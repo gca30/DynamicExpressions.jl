@@ -122,9 +122,17 @@ end
     include("test_random.jl")
 end
 
+<<<<<<< HEAD
 include("test_expressions.jl")
 include("test_multi_expression.jl")
 include("test_parse.jl")
 include("test_parametric_expression.jl")
 include("test_operator_construction_edgecases.jl")
 include("test_node_interface.jl")
+=======
+if VERSION >= v"1.9"
+    @eval @safetestset "Test CUDA" begin
+        include("test_cuda.jl")
+    end
+end
+>>>>>>> cb2d055423b415af9d2118bfcf2fc33ef67730c2

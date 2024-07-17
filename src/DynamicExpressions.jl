@@ -91,6 +91,7 @@ end
 
 import .InterfacesModule:
     ExpressionInterface, NodeInterface, all_ei_methods_except, all_ni_methods_except
+@reexport import .AsArrayModule: as_array
 
 function __init__()
     @require_extensions
