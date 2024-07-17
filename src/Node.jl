@@ -134,6 +134,25 @@ mutable struct Node{T} <: AbstractExpressionNode{T}
     Node{_T}() where {_T} = new{_T}()
 end
 
+
+abstract type AbstractTensorExpressionNode{T,N} <: AbstractExpressionNode{T} end
+
+mutable struct TensorNode{T,N} <: AbstractTensorExpressionNode{T,N}
+    # actual node values
+    degree::UInt8 # 0 for constant/variable, 1 for cos/sin, 2 for +/* etc.
+    constant::Bool # false if variable
+    # ------------------- (possibly undefined below)
+    feature::Bool # This stores the feature index for variables
+    op::UInt8  # If operator, this is the index of the operator in operators.binops, or operators.unaops
+    l::TensorNode{T,N}  # Left child node. Only defined for degree=1 or degree=2.
+    r::TensorNode{T,N}  # Right child node. Only defined for degree=2.
+    # ------------------- (extra tensor information)
+    shape::NTuple{N,Int64} # The shape of the output
+    has_constants::Bool # Has constants below branch (true for constants)
+    ix::Int64 # index of the tensor in the flattened array
+    grad_ix::Int64 # index of the gradient in the flattened array
+end
+
 """
     GraphNode{T} <: AbstractExpressionNode{T}
 
@@ -165,6 +184,7 @@ This has the same constructors as [`Node{T}`](@ref). Shared nodes
 are created simply by using the same node in multiple places
 when constructing or setting properties.
 """
+
 mutable struct GraphNode{T} <: AbstractExpressionNode{T}
     degree::UInt8  # 0 for constant/variable, 1 for cos/sin, 2 for +/* etc.
     constant::Bool  # false if variable
