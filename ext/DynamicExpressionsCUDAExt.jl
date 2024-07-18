@@ -218,4 +218,49 @@ for nuna in 0:10, nbin in 0:10
     end
 end
 
+struct FlattenedTensorList{T,N,IXT,AT}
+    nums::Vector{IXT}
+    # stores:
+    # the batch size
+    # the size of each sample
+    # for each feature:
+    #   the index into the flattened array at which it starts at
+    #   the length of the feature
+    #   N sizes representing the size of the tensor
+    flattened::AT
+
+end
+
+function make_ftl(X::AbstractArray{<:AbstractArray{T,NP1}}) where {T,NP1}
+    N = NP1-1
+    B = size(X[1], 1)
+    l = sum(Xi -> div(length(Xi), B), X)
+    f = length(X)
+    @show f
+    @show B
+    @show l
+    @show N
+    flattened = Array{T,1}(undef, B*l)
+    nums = Vector{Int32}(undef, 2+(N+2)*f)
+    nums[1] = B
+    nums[2] = l
+
+    acum = 0
+    for fi in 1:f
+        fl = div(length(X[fi]), B)
+        nums[2+(N+2)*(fi-1)+1] = acum
+        nums[2+(N+2)*(fi+1)+2] = fl
+        @view(nums[(2+(N+2)*(fi-1)+3):(2+(N+2)*(fi-1)+N+2)]) .= size(selectdim(X[fi], 1, 1))
+        acum += fl
+    end
+    
+    for bi in 1:B
+        for fi in 1:f
+            acum = nums[2+(N+2)*(fi-1)+1]
+            fl = nums[2+(N+2)*(fi+1)+2]
+            @view(flattened[(l*(bi-1)+acum+1):(l*(bi-1)+acum+fl)]) .= reshape(selectdim(X, 1, bi), (fl,))
+        end
+    end
+
+    return FlattenedTensorList{T,N,UInt32,CuArray{T,2,CUDA.Mem.DeviceBuffer}}(nums, cu(reshape(flattened, (l,B))))
 end

@@ -60,7 +60,7 @@ customize the parsing behavior with
 
 - `parse_leaf`
 """
-abstract type AbstractExpression{T,NodeT} end
+abstract type AbstractExpression{T,NodeT,NumDims} end
 
 """
     Expression{T, N, D} <: AbstractExpression{T, N}
@@ -84,14 +84,12 @@ expression tree (like `Node`) along with associated metadata for evaluation and 
 This type is intended for end-users to interact with and manipulate expressions at a high level,
 abstracting away the complexities of the underlying expression tree operations.
 """
-struct Expression{T,N<:AbstractExpressionNode{T},D<:NamedTuple} <: AbstractExpression{T,N}
+struct Expression{T,N<:AbstractExpressionNode{T},D<:NamedTuple} <: AbstractExpression{T,N,1}
     tree::N
     metadata::Metadata{D}
 end
 
-abstract type AbstractTensorExpression{T,NodeT,NumDims} end
-
-struct TensorExpression{T,N,AT<:AbstractArray{T,N},NodeT<:AbstractTensorExpressionNode{T,N},D<:NamedTuple} <: AbstractTensorExpression{T,NT,N}
+struct TensorExpression{T,N,AT<:AbstractArray{T,N},NodeT<:AbstractTensorExpressionNode{T,N},D<:NamedTuple} <: AbstractExpression{T,NT,N}
     tree::NodeT
     constants::Vector{AT}
     metadata::Metadata{D}
