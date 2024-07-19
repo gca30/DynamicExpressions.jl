@@ -3,7 +3,7 @@ module ExpressionModule
 
 using DispatchDoctor: @unstable
 
-using ..NodeModule: AbstractExpressionNode, Node
+using ..NodeModule: AbstractExpressionNode, AbstractTensorExpressionNode, Node, TensorNode
 using ..OperatorEnumModule: AbstractOperatorEnum, OperatorEnum
 using ..UtilsModule: Undefined
 using ..ChainRulesModule: NodeTangent
@@ -84,14 +84,14 @@ expression tree (like `Node`) along with associated metadata for evaluation and 
 This type is intended for end-users to interact with and manipulate expressions at a high level,
 abstracting away the complexities of the underlying expression tree operations.
 """
-struct Expression{T,N<:AbstractExpressionNode{T},D<:NamedTuple} <: AbstractExpression{T,N,1}
+struct Expression{T,N<:AbstractExpressionNode{T},D<:NamedTuple} <: AbstractExpression{T,N,0}
     tree::N
     metadata::Metadata{D}
 end
 
-struct TensorExpression{T,N,AT<:AbstractArray{T,N},NodeT<:AbstractTensorExpressionNode{T,N},D<:NamedTuple} <: AbstractExpression{T,NT,N}
+struct TensorExpression{T,N,ArrayT<:AbstractArray{T,N},NodeT<:AbstractTensorExpressionNode{T,N},D<:NamedTuple} <: AbstractExpression{T,NodeT,N}
     tree::NodeT
-    constants::Vector{AT}
+    constants::Vector{ArrayT}
     metadata::Metadata{D}
 end
 

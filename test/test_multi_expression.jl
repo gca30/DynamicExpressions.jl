@@ -6,7 +6,7 @@
 
     struct MultiScalarExpression{
         T,N<:AbstractExpressionNode{T},TREES<:NamedTuple,D<:NamedTuple
-    } <: AbstractExpression{T,N}
+    } <: AbstractExpression{T,N,0}
         trees::TREES
         metadata::Metadata{D}
 

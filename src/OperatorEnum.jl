@@ -28,7 +28,7 @@ struct GenericOperatorEnum{B,U} <: AbstractOperatorEnum
     unaops::U
 end
 
-struct TensorOperator{Finplace,Fgrad,Fconstr,Fshapef,Fcompl}
+struct TensorOperator{Finplace,Fext,Fgrad,Fconstr,Fshapef,Fcompl}
     # op::Fdirect
         # gets the value
     op!::Finplace
@@ -81,8 +81,8 @@ broadcast_binop(op::Fnum; op_complexity=1) where {Fnum} = TensorOperator(
         sum!(∂r, ∂res .* map(x->x[2], grads))
     end,
     () -> error("Shape inference not yet defined"),
-    (sl::NTuple{N,Int64}, sr::NTuple{N,Int64}) where {N} -> 
-        prod(ntuple(i -> max(sl[i], sr[i]), Val(N))) * op_complexity
+    (sl, sr) -> 
+        prod(ntuple(i -> max(sl[i], sr[i]), Val(length(sl)))) * op_complexity
 )
 
 """

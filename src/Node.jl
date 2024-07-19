@@ -135,22 +135,49 @@ mutable struct Node{T} <: AbstractExpressionNode{T}
 end
 
 
-abstract type AbstractTensorExpressionNode{T,N} <: AbstractExpressionNode{T} end
 
+"""
+    AbstractTensorExpressionNode{T, N} <: AbstractNode{T}
+
+Abstract type for nodes that represent an expression dealing with tensors.
+Compared to the the scalar version, the tensor expression nodes don't
+store their value directly in the node, but in an another flattened
+tensor array specifically used for constants.
+Along with the fields required for `AbstractNode`,
+this additionally must have fields for:
+- `constant::Bool`
+- `feature::UInt16`
+- `op::UInt8`
+- TODO
+
+"""
+abstract type AbstractTensorExpressionNode{T,N} <: AbstractNode end
+
+"""
+    TensorNode{T,N} <: AbstractTensorExpressionNode{T,N}
+
+Default implementation of AbstractTensorExpressionNode{T,N}.
+
+# Constructors
+
+- `TensorNode[{T[,N]}]([N[, T]]; constant=nothing, feature=nothing, op=nothing, l=nothing, r=nothing, children=nothing, allocator=default_allocator)`
+
+"""
 mutable struct TensorNode{T,N} <: AbstractTensorExpressionNode{T,N}
     # actual node values
     degree::UInt8 # 0 for constant/variable, 1 for cos/sin, 2 for +/* etc.
     constant::Bool # false if variable
     # ------------------- (possibly undefined below)
-    feature::Bool # This stores the feature index for variables
+    feature::Bool # This stores the feature index for inputs, the index in the constants array for constants
     op::UInt8  # If operator, this is the index of the operator in operators.binops, or operators.unaops
     l::TensorNode{T,N}  # Left child node. Only defined for degree=1 or degree=2.
     r::TensorNode{T,N}  # Right child node. Only defined for degree=2.
-    # ------------------- (extra tensor information)
-    shape::NTuple{N,Int64} # The shape of the output
-    has_constants::Bool # Has constants below branch (true for constants)
-    ix::Int64 # index of the tensor in the flattened array
-    grad_ix::Int64 # index of the gradient in the flattened array
+    # ------------------- (extra tensor information, might store them elsewhere, TODO)
+    # shape::NTuple{N,Int64} # The shape of the output
+    # has_constants::Bool # Has constants below branch (true for constants)
+    # ix::Int64 # index of the tensor in the flattened array
+    # grad_ix::Int64 # index of the gradient in the flattened array
+    TensorNode{_T,_N}() where {_T,_N} = new{_T,_N}()
 end
 
 """
@@ -193,7 +220,7 @@ mutable struct GraphNode{T} <: AbstractExpressionNode{T}
     feature::UInt16  # If is a variable (e.g., x in cos(x)), this stores the feature index.
     op::UInt8  # If operator, this is the index of the operator in operators.binops, or operators.unaops
     l::GraphNode{T}  # Left child node. Only defined for degree=1 or degree=2.
-    r::GraphNode{T}  # Right child node. Only defined for degree=2. 
+    r::GraphNode{T}  # Right child node. Only defined for degree=2.
 
     GraphNode{_T}() where {_T} = new{_T}()
 end
@@ -203,26 +230,35 @@ end
 
 Base.eltype(::Type{<:AbstractExpressionNode{T}}) where {T} = T
 Base.eltype(::AbstractExpressionNode{T}) where {T} = T
+Base.eltype(::Type{<:AbstractTensorExpressionNode{T}}) where {T} = T
+Base.eltype(::AbstractTensorExpressionNode{T}) where {T} = T
 
 @unstable constructorof(::Type{N}) where {N<:AbstractNode} = Base.typename(N).wrapper
 @unstable constructorof(::Type{<:Node}) = Node
+@unstable constructorof(::Type{<:TensorNode}) = TensorNode
 @unstable constructorof(::Type{<:GraphNode}) = GraphNode
 
 function with_type_parameters(::Type{N}, ::Type{T}) where {N<:AbstractExpressionNode,T}
     return constructorof(N){T}
 end
+function with_type_parameters(::Type{NodeT}, ::Type{T}, ::Val{NumDims}) where {NodeT<:AbstractTensorExpressionNode,T,NumDims}
+    return constructorof(NodeT){T,NumDims}
+end
 with_type_parameters(::Type{<:Node}, ::Type{T}) where {T} = Node{T}
+with_type_parameters(::Type{<:TensorNode}, ::Type{T}, ::Val{N}) where {T,N} = TensorNode{T,N}
 with_type_parameters(::Type{<:GraphNode}, ::Type{T}) where {T} = GraphNode{T}
 
 function default_allocator(::Type{N}, ::Type{T}) where {N<:AbstractExpressionNode,T}
     return with_type_parameters(N, T)()
 end
 default_allocator(::Type{<:Node}, ::Type{T}) where {T} = Node{T}()
+default_allocator(::Type{<:TensorNode}, ::Type{T}, ::Val{N}) where {T,N} = TensorNode{T,N}()
 default_allocator(::Type{<:GraphNode}, ::Type{T}) where {T} = GraphNode{T}()
 
 """Trait declaring whether nodes share children or not."""
 preserve_sharing(::Union{Type{<:AbstractNode},AbstractNode}) = false
 preserve_sharing(::Union{Type{<:Node},Node}) = false
+preserve_sharing(::Union{Type{<:TensorNode},TensorNode}) = false
 preserve_sharing(::Union{Type{<:GraphNode},GraphNode}) = true
 
 include("base.jl")
@@ -254,10 +290,107 @@ function validate_not_all_defaults(::Type{N}, val, feature, op, l, r, children) 
     end
     return nothing
 end
+
+@inline function (::Type{NodeT})(
+    arg1::Union{Integer, Val{N}}=Val(0), arg2::Type{T1}=Undefined; feature=nothing, constant=nothing, op=nothing, l::Union{Nothing,AbstractTensorExpressionNode}=nothing, r=nothing, children=nothing, allocator::F=default_allocator,
+) where {T1,NodeT<:AbstractTensorExpressionNode,F,N}
+    N0 = arg1 isa integer ? arg1 : N
+    TT = if l !== nothing
+        if r !== nothing
+            promote_type(
+                typeof(l).parameters[1],
+                typeof(r).parameters[1]
+            )
+        else
+            typeof(l).parameters[1]
+        end
+    elseif !(NodeT isa UnionAll)
+        NodeT.parameters[1]
+    elseif !(NodeT.body isa UnionAll)
+        NodeT.body.parameters[1]
+    elseif arg2 !== Udefined
+        T1
+    else
+        Undefined
+    end
+    NN = if l !== nothing
+        typeof(l).parameters[2]
+    elseif !(NodeT isa UnionAll)
+        NodeT.parameters[2]
+    elseif N0 != 0
+        N0
+    else
+        
+    end
+
+    if TT === Undefined && NN == 0
+        # Dummy node!
+        error("Unspecified $NodeT constructor")
+    elseif TT === Undefined
+        error("Type not specified in $NodeT constructor")
+    elseif NN == 0
+        error("Number of dimentions not specified in $NodeT constructor")
+    else
+        validate_not_all_defaults(NodeT, constant, feature, op, l, r, children)
+    end
+
+    if children !== nothing
+        @assert l === nothing && r === nothing
+        if length(children) == 1
+            return tensor_node_factory(NodeT, TT, Val(NN), val, feature, op, only(children), nothing, allocator)
+        else
+            return tensor_node_factory(NodeT, TT, Val(NN), val, feature, op, children..., allocator)
+        end
+    end
+    return tensor_node_factory(NodeT, TT, Val(NN), val, feature, op, l, r, allocator)
+end
+function validate_not_all_defaults(::Type{NodeT}, ::Val{N1}, constant, feature, op, l, r, children) where {NodeT<:AbstractTensorExpressionNode,N1}
+    if constant === nothing && feature === nothing && op === nothing && l === nothing && r === nothing && children === nothing
+        error(
+            "Encountered the call for $NodeT() inside the generic constructor. "
+            * "Did you forget to define `$(Base.typename(N).wrapper){T}() where {T} = new{T}()`?"
+        )
+    end
+    return nothing
+end
+
+"""Create a constant/variable leaf."""
+@inline function tensor_node_factory(
+    ::Type{NodeT}, ::Val{N}, ::Type{T}, constant::Bool, feature::Integer, ::Nothing, ::Nothing, ::Nothing, allocator::F,
+) where {NodeT<:AbstractTensorExpressionNode,N,T,F}
+    n = allocator(NodeT, T, Val(N))
+    n.degree = 0
+    n.constant = constant
+    n.feature = feature
+    return n
+end
+"""Create a unary operator node."""
+@inline function tensor_node_factory(
+    ::Type{NodeT}, ::Val{N}, ::Type{T}, ::Nothing, ::Nothing, op::Integer, l::AbstractTensorExpressionNode{T2,N}, ::Nothing, allocator::F,
+) where {N,NodeT<:AbstractTensorExpressionNode,T,T2,F}
+    @assert l isa NodeT
+    n = allocator(N, T, Val(N))
+    n.degree = 1
+    n.op = op
+    n.l = l
+    return n
+end
+"""Create a binary operator node."""
+@inline function tensor_node_factory(
+    ::Type{NodeT}, ::Val{N}, ::Type{T}, ::Nothing, ::Nothing, op::Integer, l::AbstractTensorExpressionNode{T2,N}, r::AbstractTensorExpressionNode{T3,N}, allocator::F,
+) where {N,NodeT<:AbstractTensorExpressionNode,T,T2,T3,F}
+    n = allocator(NodeT, T, Val(N))
+    n.degree = 2
+    n.op = op
+    n.l = T2 === T ? l : convert(with_type_parameters(NodeT, T, Val(N)), l)
+    n.r = T3 === T ? r : convert(with_type_parameters(NodeT, T, Val(N)), r)
+    return n
+end
+
 """Create a constant leaf."""
 @inline function node_factory(
     ::Type{N}, ::Type{T1}, val::T2, ::Nothing, ::Nothing, ::Nothing, ::Nothing, allocator::F,
-) where {N,T1,T2,F}
+) where {N<:AbstractExpressionNode,T1,T2,F}
     T = node_factory_type(N, T1, T2)
     n = allocator(N, T)
     n.degree = 0
@@ -268,7 +401,7 @@ end
 """Create a variable leaf, to store data."""
 @inline function node_factory(
     ::Type{N}, ::Type{T1}, ::Nothing, feature::Integer, ::Nothing, ::Nothing, ::Nothing, allocator::F,
-) where {N,T1,F}
+) where {N<:AbstractExpressionNode,T1,F}
     T = node_factory_type(N, T1, DEFAULT_NODE_TYPE)
     n = allocator(N, T)
     n.degree = 0
@@ -279,7 +412,7 @@ end
 """Create a unary operator node."""
 @inline function node_factory(
     ::Type{N}, ::Type{T1}, ::Nothing, ::Nothing, op::Integer, l::AbstractExpressionNode{T2}, ::Nothing, allocator::F,
-) where {N,T1,T2,F}
+) where {N<:AbstractExpressionNode,T1,T2,F}
     @assert l isa N
     T = T2  # Always prefer existing nodes, so we don't mess up references from conversion
     n = allocator(N, T)
@@ -291,7 +424,7 @@ end
 """Create a binary operator node."""
 @inline function node_factory(
     ::Type{N}, ::Type{T1}, ::Nothing, ::Nothing, op::Integer, l::AbstractExpressionNode{T2}, r::AbstractExpressionNode{T3}, allocator::F,
-) where {N,T1,T2,T3,F}
+) where {N<:AbstractExpressionNode,T1,T2,T3,F}
     T = promote_type(T2, T3)
     n = allocator(N, T)
     n.degree = 2
@@ -324,6 +457,16 @@ function (::Type{N})(
 ) where {N<:AbstractExpressionNode}
     return N(; op=op, l=l, r=r)
 end
+function (::Type{N})(
+    op::Integer, l::AbstractTensorExpressionNode
+) where {N<:AbstractTensorExpressionNode}
+    return N(; op=op, l=l)
+end
+function (::Type{N})(
+    op::Integer, l::AbstractTensorExpressionNode, r::AbstractTensorExpressionNode
+) where {N<:AbstractTensorExpressionNode}
+    return N(; op=op, l=l, r=r)
+end
 function (::Type{N})(var_string::String) where {N<:AbstractExpressionNode}
     Base.depwarn(
         "Creating a node using a string is deprecated and will be removed in a future version.",
@@ -341,6 +484,9 @@ end
 function Base.promote_rule(::Type{Node{T1}}, ::Type{Node{T2}}) where {T1,T2}
     return Node{promote_type(T1, T2)}
 end
+function Base.promote_rule(::Type{TensorNode{T1,N}}, ::Type{TensorNode{T2,N}}) where {T1,T2,N}
+    return TensorNode{promote_type(T1, T2), N}
+end
 function Base.promote_rule(::Type{GraphNode{T1}}, ::Type{Node{T2}}) where {T1,T2}
     return GraphNode{promote_type(T1, T2)}
 end
@@ -349,14 +495,14 @@ function Base.promote_rule(::Type{GraphNode{T1}}, ::Type{GraphNode{T2}}) where {
 end
 
 # TODO: Verify using this helps with garbage collection
-create_dummy_node(::Type{N}) where {N<:AbstractExpressionNode} = N()
+create_dummy_node(::Type{N}) where {N<:Union{AbstractExpressionNode,AbstractTensorExpressionNode}} = N()
 
 """
     set_node!(tree::AbstractExpressionNode{T}, new_tree::AbstractExpressionNode{T}) where {T}
 
 Set every field of `tree` equal to the corresponding field of `new_tree`.
 """
-function set_node!(tree::AbstractExpressionNode, new_tree::AbstractExpressionNode)
+function set_node!(tree::Union{AbstractExpressionNode,AbstractTensorExpressionNode}, new_tree::Union{AbstractExpressionNode, AbstractTensorExpressionNode})
     # First, ensure we free some memory:
     if new_tree.degree < 2 && tree.degree == 2
         tree.r = create_dummy_node(typeof(tree))
@@ -368,7 +514,7 @@ function set_node!(tree::AbstractExpressionNode, new_tree::AbstractExpressionNod
     tree.degree = new_tree.degree
     if new_tree.degree == 0
         tree.constant = new_tree.constant
-        if new_tree.constant
+        if !(tree isa AbstractTensorExpressionNode) && new_tree.constant
             tree.val = new_tree.val::eltype(new_tree)
         else
             tree.feature = new_tree.feature

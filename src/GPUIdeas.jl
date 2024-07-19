@@ -7,10 +7,10 @@ const FTLPositionInfo = Tuple{IXT,IXT,NTuple{N,IXT},NTuple{N,IXT}} where {IXT,N}
 # The first axis is the batch axis. The second axis is the feature axis.
 # Different features can have diferent shapes, but along the batch axes, the shapes are the same.
 # The flattened representation also stores the batch axis last, so it shouldn't have problems with cache.
-struct FlattenedTensorList{T,N,IXT,AT<:AbstractArray{T,1}}
-    B::IXT
-    L::IXT
-    flattened::AT
+struct FlattenedTensorList{T,N,IXT,AT<:AbstractVector{T}}
+    B::IXT # number of samples
+    L::IXT # total length in Ts of each sample
+    flattened::AT # A B*L array of Ts
     positions::Vector{FTLPositionInfo{IXT,N}}
     # for each feature:
     #   the index into the flattened array at which it starts at
@@ -19,7 +19,15 @@ struct FlattenedTensorList{T,N,IXT,AT<:AbstractArray{T,1}}
     #   N strides
 end
 
-function flatten_cu(X::AbstractArray{<:AbstractArray{T,NP1}}) where {T,NP1}
+function treat_as_flattened(buff::AT, sizes::Vector{NTuple{N, IXT}}) where {T,IXT,N,AT<:AbstractVector{T}}
+    positions = Vector{FTLPositionInfo{Int32,N}}(undef, f)
+    map!(csize -> (0, prod(csize), csize, (1, cumprod(Base.front(csize))...)), positions, sizes)
+    l = positions[end][1] + positions[end][2]
+    b = div(length(buff), l)
+    return FlattenedTensorList{T,N,IXT,AT}(b, l, buff, positions)
+end
+
+function flatten_cu(X::AbstractVector{<:AbstractArray{T,NP1}}) where {T,NP1}
     N = NP1-1
     B = size(X[1], 1)
     l = sum(Xi -> div(length(Xi), B), X)
@@ -40,14 +48,6 @@ function flatten_cu(X::AbstractArray{<:AbstractArray{T,NP1}}) where {T,NP1}
     return FlattenedTensorList{T, N, Int32, CuArray{T, 1, CUDA.Mem.DeviceBuffer}}(B, l, cu(flattened), positions)
 end
 
-# gets an elemnt, but without using the struct
-# we should be able to copy this directly into the kernel
-@inline function getindex_flat(flattened::AbstractArray{T,1}, L::IXT, positions::AbstractArray{FTLPositionInfo{IXT,N}}, fi::Integer, bi::Integer, ixs::Vararg{Integer,N}) where {T,N,IXT}
-    acum, _, _, stride = positions[fi]
-    fix = sum(NTuple{N,IXT}(ixs) .* (stride .- one(IXT))) + one(IXT)
-    return flattened[L*(bi-1) + acum + fix]
-end
-
 # gets an element
 @inline function Base.getindex(ftl::FlattenedTensorList{T,N,IXT,AT}, fi::Integer, bi::Integer, ixs::Vararg{Integer,N}) where {T,N,IXT,AT}
     acum, _, _, stride = ftl.positions[fi]
@@ -55,11 +55,18 @@ end
     return ftl.flattened[ftl.L*(bi-1) + acum + fix]
 end
 
-# returns a reshape(view(CuArray)) representing a feature
+# returns a reshape(view(CuArray)) representing a feature with all the samples
 @inline function Base.getindex(ftl::FlattenedTensorList{T,N,IXT,AT}, fi::Integer) where {T,N,IXT,AT}
     acum, fl, sizes, _ = ftl.positions[fi]
     ffv = @view(reshape(ftl.flattened, (ftl.L, ftl.B))[(acum + 1):(acum + fl), :])
     return reshape(ffv, (sizes..., ftl.B))
+end
+
+# returns a reshape(view(CuArray)) representing a feature of the given sample
+@inline function Base.getindex(ftl::FlattenedTensorList{T,N,IXT,AT}, fi::Integer, bi::Integer) where {T,N,IXT,AT}
+    acum, fl, sizes, _ = ftl.positions[fi]
+    ffv = @view(reshape(ftl.flattened, (ftl.L, ftl.B))[(acum + 1):(acum + fl), bi])
+    return reshape(ffv, (sizes...))
 end
 
 # For evaluation on the GPU, we must:
@@ -90,4 +97,5 @@ end
 #        source = inputs / constants / temp buffer
 #        threads = number of threads to allocate for the operation
 #   the operator will have a macro that takes a number from 1:threads and returns what to do in that thread
+#   a macro is necesary so that the gpu kernel compiles instead of calling functions (which might not work on the gpu)
 

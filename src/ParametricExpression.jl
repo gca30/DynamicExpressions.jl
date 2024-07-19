@@ -65,7 +65,7 @@ struct ParametricExpression{
     T,
     N<:ParametricNode{T},
     D<:NamedTuple{(:operators, :variable_names, :parameters, :parameter_names)},
-} <: AbstractExpression{T,N}
+} <: AbstractExpression{T,N,0}
     tree::N
     metadata::Metadata{D}
 
