@@ -3,7 +3,7 @@ module NodeUtilsModule
 import Compat: Returns
 import ..NodeModule:
     AbstractNode,
-    AbstractExpressionNode,
+    AbstractExprNode,
     Node,
     preserve_sharing,
     constructorof,
@@ -27,18 +27,18 @@ function count_depth(tree::AbstractNode)
 end
 
 """
-    is_node_constant(tree::AbstractExpressionNode)::Bool
+    is_node_constant(tree::AbstractScalarExprNode)::Bool
 
 Check if the current node in a tree is constant.
 """
-@inline is_node_constant(tree::AbstractExpressionNode) = tree.degree == 0 && tree.constant
+@inline is_node_constant(tree::AbstractExprNode) = tree.degree == 0 && tree.constant
 
 """
-    count_constant_nodes(tree::AbstractExpressionNode)::Int
+    count_constant_nodes(tree::AbstractScalarExprNode)::Int
 
 Count the number of constant nodes in a tree.
 """
-function count_constant_nodes(tree::AbstractExpressionNode)
+function count_constant_nodes(tree::AbstractExprNode)
     return tree_mapreduce(
         node -> is_node_constant(node) ? 1 : 0,
         +,
@@ -49,34 +49,34 @@ function count_constant_nodes(tree::AbstractExpressionNode)
 end
 
 """
-    has_constants(tree::AbstractExpressionNode)::Bool
+    has_constants(tree::AbstractScalarExprNode)::Bool
 
 Check if a tree has any constants.
 """
-has_constants(tree::AbstractExpressionNode) = any(is_node_constant, tree)
+has_constants(tree::AbstractExprNode) = any(is_node_constant, tree)
 
 """
-    has_operators(tree::AbstractExpressionNode)::Bool
+    has_operators(tree::AbstractScalarExprNode)::Bool
 
 Check if a tree has any operators.
 """
-has_operators(tree::AbstractExpressionNode) = tree.degree != 0
+has_operators(tree::AbstractExprNode) = tree.degree != 0
 
 """
-    is_constant(tree::AbstractExpressionNode)::Bool
+    is_constant(tree::AbstractScalarExprNode)::Bool
 
 Check if an expression is a constant numerical value, or
 whether it depends on input features.
 """
-is_constant(tree::AbstractExpressionNode) = all(t -> t.degree != 0 || t.constant, tree)
+is_constant(tree::AbstractExprNode) = all(t -> t.degree != 0 || t.constant, tree)
 
 """
-    count_scalar_constants(tree::AbstractExpressionNode{T})::Int64 where {T}
+    count_scalar_constants(tree::AbstractScalarExprNode{T})::Int64 where {T}
 
 Counts the number of scalar constants in the tree.
 Used in get_scalar_constants to preallocate a vector for storing constants array.
 """
-function count_scalar_constants(tree::AbstractExpressionNode{T}) where {T}
+function count_scalar_constants(tree::AbstractScalarExprNode{T}) where {T}
     return tree_mapreduce(
         node -> is_node_constant(node) ? count_scalar_constants(node.val) : 0,
         +,
@@ -87,7 +87,7 @@ function count_scalar_constants(tree::AbstractExpressionNode{T}) where {T}
 end
 
 """
-    get_scalar_constants(tree::AbstractExpressionNode{T}, BT::Type = T)::Vector{T} where {T}
+    get_scalar_constants(tree::AbstractScalarExprNode{T}, BT::Type = T)::Vector{T} where {T}
 
 Get all the scalar constants inside a tree, in depth-first order.
 The function `set_scalar_constants!` sets them in the same order,
@@ -95,7 +95,7 @@ given the output of this function.
 Also return metadata that can will be used in the `set_scalar_constants!` function.
 """
 function get_scalar_constants(
-    tree::AbstractExpressionNode{T}, ::Type{BT}=get_number_type(T)
+    tree::AbstractScalarExprNode{T}, ::Type{BT}=get_number_type(T)
 ) where {T,BT}
     refs = filter_map(
         is_node_constant, node -> Ref(node), tree, Base.RefValue{typeof(tree)}
@@ -114,12 +114,12 @@ function get_scalar_constants(
 end
 
 """
-    set_scalar_constants!(tree::AbstractExpressionNode{T}, constants, refs) where {T}
+    set_scalar_constants!(tree::AbstractScalarExprNode{T}, constants, refs) where {T}
 
 Set the constants in a tree, in depth-first order. The function
 `get_scalar_constants` gets them in the same order.
 """
-function set_scalar_constants!(tree::AbstractExpressionNode{T}, constants, refs) where {T}
+function set_scalar_constants!(tree::AbstractScalarExprNode{T}, constants, refs) where {T}
     if T <: Number
         @inbounds for i in eachindex(refs, constants)
             refs[i][].val = constants[i]
@@ -138,6 +138,55 @@ function set_scalar_constants!(tree::AbstractExpressionNode{T}, constants, refs)
         end
     end
     return tree
+end
+
+# renumbers the constants to be from 1 to C
+# this removes the information of the original constant indices
+function renumber_constants!(tree::AbstractTensorExprNode, cindex::Integer = 1)
+    if tree.degree == 2
+        cindex = renumber_constants!(tree.l, cindex)
+        cindex = renumber_constants!(tree.r, cindex)
+    elseif tree.degree == 1
+        cindex = renumber_constants!(tree.l, cindex)
+    elseif tree.degree == 0
+        if tree.constant
+            tree.feature = cindex
+            return cindex + 1
+        end
+    end
+    return cindex
+end
+
+# renumbers the nodes to be from 1 to the number of temporary nodes (meaning inputs and constants are not numbered)
+# this removes the information of the original constant indices
+function renumber_nodes!(tree::AbstractTensorExprNode, nindex::Integer = 1)
+    if tree.degree == 2
+        nindex = renumber_nodes!(tree.l, nindex)
+        nindex = renumber_nodes!(tree.r, nindex)
+        tree.feature = nindex
+        return nindex+1
+    elseif tree.degree == 1
+        nindex = renumber_nodes!(tree.l, nindex)
+        tree.feature = nindex
+        return nindex+1
+    elseif tree.degree == 0
+        return nindex
+    end
+end
+
+# a the nodes to be from 1 to the number of temporary nodes (meaning inputs and constants are not numbered)
+# this removes the information of the original constant indices
+function recalculate_has_constants!(tree::AbstractTensorExprNode)
+    if tree.degree == 2
+        recalculate_has_constants!(tree.l)
+        recalculate_has_constants!(tree.r)
+        tree.has_constants = tree.l.has_constants && tree.r.has_constants
+    elseif tree.degree == 1
+        recalculate_has_constants!(tree.l)
+        tree.has_constants = tree.l.has_constants
+    elseif tree.degree == 0
+        tree.has_constants = tree.constant
+    end
 end
 
 ## Assign index to nodes of a tree
@@ -161,7 +210,7 @@ end
 # as we trace over the node we are indexing on.
 preserve_sharing(::Union{Type{<:NodeIndex},NodeIndex}) = false
 
-function index_constant_nodes(tree::AbstractExpressionNode, ::Type{T}=UInt16) where {T}
+function index_constant_nodes(tree::AbstractScalarExprNode, ::Type{T}=UInt16) where {T}
     # Essentially we copy the tree, replacing the values
     # with indices
     constant_index = Ref(T(0))

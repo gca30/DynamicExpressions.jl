@@ -35,9 +35,6 @@ struct TensorOperator{Finplace,Fext,Fgrad,Fconstr,Fshapef,Fcompl}
         # does the operation and puts the result into z
         # (l,[ r,] res) -> Nothing
         # inputs are arrays
-    extended_op!::Fext
-        # does the operation, but with the first dimension being the datapoints
-        # (l,[ r,] res) -> Noting
     # op_gpu_config::Fgpuc
         # !!! return the gpu config (probably the number of threads)
         # ...
@@ -46,7 +43,7 @@ struct TensorOperator{Finplace,Fext,Fgrad,Fconstr,Fshapef,Fcompl}
         # ....
     gradient!::Fgrad
         # computes the derivatives, given the derivative of the output (res) and stores it into ∂l 
-        # (res, ∂res, l, ∂l [, r, ∂r]) -> Nothing
+        # (res, ∂res, l, ∂l [, r, ∂r], Val(comp)) -> Nothing
         # inputs are arrays
     append_constraint!::Fconstr 
         # appends the constraints when trying to infer the shape
@@ -63,7 +60,7 @@ end
 
 broadcast_unaop(op::Fnum; op_complexity=1) where {Fnum} = TensorOperator(
     (l, res) -> (@. res = op(l)),
-    (l, res) -> (@. res = op(l)),
+    # (l, res) -> (@. res = op(l)),
     (res, ∂res, l, ∂l) -> begin
         map!(first, ∂l, gradient.(op, l))
         @. ∂l *= ∂res 
@@ -74,11 +71,15 @@ broadcast_unaop(op::Fnum; op_complexity=1) where {Fnum} = TensorOperator(
 
 broadcast_binop(op::Fnum; op_complexity=1) where {Fnum} = TensorOperator(
     (l, r, res) -> (@. res = op(l, r)),
-    (l, r, res) -> (@. res = op(l, r)),
-    (res, ∂res, l, ∂l, r, ∂r) -> begin
+    # (l, r, res) -> (@. res = op(l, r)),
+    (res, ∂res, l, ∂l, r, ∂r, Val(comp)) where {comp} -> begin
         grads = gradient.(op, l, r)
-        sum!(∂l, ∂res .* map(x->x[1], grads))
-        sum!(∂r, ∂res .* map(x->x[2], grads))
+        if comp & 0b10
+            sum!(∂l, ∂res .* map(x->x[1], grads))
+        end
+        if comp & 0b01
+            sum!(∂r, ∂res .* map(x->x[2], grads))
+        end
     end,
     () -> error("Shape inference not yet defined"),
     (sl, sr) -> 

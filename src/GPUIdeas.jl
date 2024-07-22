@@ -99,3 +99,201 @@ end
 #   the operator will have a macro that takes a number from 1:threads and returns what to do in that thread
 #   a macro is necesary so that the gpu kernel compiles instead of calling functions (which might not work on the gpu)
 
+function eval_tree_array_cpu(
+    tree::AbstractTensorExprNode{T,N},
+    cX::FlattenedTensorList{T,N,IXT,AT},
+    constants::FlattenedTensorList{T,N,IXT,AT},
+    operators::TensorOperatorEnum
+) where {T,N,IXT,AT}
+
+    if tree.degree == 0
+        if tree.constant
+            # value
+            return constants[tree.feature]
+        else
+            # input
+            return cX[tree.feature]
+        end
+    elseif tree.degree == 1
+        top = operators.unaops[tree.op]
+        inner = eval_tree_array_cpu(tree.l, cX, constants, operator)
+        outer = Array{T, N+1}(undef, tree.shape..., size(inner, N+1))
+        top.op!(inner, outer)
+        return outer
+    elseif tree.degree == 2
+        top = operators.binops[tree.op]
+        inner_l = eval_tree_array_cpu(tree.l, cX, constants, operator)
+        inner_r = eval_tree_array_cpu(tree.r, cX, constants, operator)
+        outer = Array{T, N+1}(undef, tree.shape..., max(size(inner_l, N+1), size(inner_r, N+1)))
+        top.op!(inner_l, inner_r, outer)
+        return outer
+    end
+
+end
+
+function _forward_eval_diff_tree_array_cpu(
+    node::AbstractTensorExprNode{T,N},
+    cX::FlattenedTensorList{T,N,IXT,AT},
+    constants::FlattenedTensorList{T,N,IXT,AT},
+    operators::TensorOperatorEnum,
+    output::FlattenedTensorList{T,N,IXT,AT},
+) where {T,N,IXT,AT}
+    if tree.degree == 0
+        return
+    elseif tree.degree == 1
+        top = operators.unaops[tree.op]
+        _forward_eval_diff_tree_array_cpu(node.l, cX, constants, operators, output)
+        for i in 1:output.B
+            top.op!(
+                if node.l.constant 
+                    constants[node.l.feature, 1]
+                elseif node.l.degree == 0
+                    cX[node.l.feature, i]
+                else
+                    output[node.l.feature, i]
+                end, 
+                output[node.feature, i]
+            )
+        end
+    elseif tree.degree == 2
+        top = operators.unaops[tree.op]
+        _forward_eval_diff_tree_array_cpu(node.l, cX, constants, operators, output)
+        _forward_eval_diff_tree_array_cpu(node.r, cX, constants, operators, output)
+        for i in 1:output.B
+            top.op!(
+                if node.l.constant 
+                    constants[node.l.feature, 1]
+                elseif node.l.degree == 0
+                    cX[node.l.feature, i]
+                else
+                    output[node.l.feature, i]
+                end, 
+                if node.r.constant 
+                    constants[node.r.feature, 1]
+                elseif node.r.degree == 0
+                    cX[node.r.feature, i]
+                else
+                    output[node.r.feature, i]
+                end,
+                output[node.feature, i]
+            )
+        end
+    end
+end
+
+function _backward_eval_diff_tree_array_cpu(
+    node::AbstractTensorExprNode{T,N},
+    cX::FlattenedTensorList{T,N,IXT,AT},
+    constants::FlattenedTensorList{T,N,IXT,AT},
+    operators::TensorOperatorEnum,
+    output::FlattenedTensorList{T,N,IXT,AT},
+) where {T,N,IXT,AT}
+    if tree.degree == 0
+        if tree.constant
+            cX[tree.feature, 2] .= zero(T)
+            for i in 1:output.B
+                @. cX[tree.feature, 2] += output[tree.grad_ix, i] / convert(T, output.B)
+            end
+        end
+    elseif tree.degree == 1
+        top = operators.unaops[tree.op]
+        for i in 1:output.B
+            top.grad!(
+                output[node.feature, i],
+                output[node.grad_ix, i],
+                if node.l.degree == 0 && node.l.constant 
+                    constants[node.l.feature, 1]
+                elseif node.l.degree == 0
+                    cX[node.l.feature, i]
+                else
+                    output[node.l.feature, i]
+                end, 
+                output[node.l.grad_ix, i]
+            )
+        end
+        _backward_eval_diff_tree_array_cpu(node.l, cX, constants, operators, output)
+    elseif tree.degree == 2
+        top = operators.unaops[tree.op]
+        top.grad!(
+            output[node.feature, i],
+                output[node.grad_ix, i],
+            if node.l.degree == 0 && node.l.constant 
+                constants[node.l.feature, 1]
+            elseif node.l.degree == 0
+                cX[node.l.feature, i]
+            else
+                output[node.l.feature, i]
+            end,
+            if node.l.has_constants
+                output[node.l.grad_ix, i]
+            else
+                output[1, i]
+            end,
+            if node.r.degree == 0 && node.r.constant 
+                constants[node.r.feature, 1]
+            elseif node.r.degree == 0
+                cX[node.r.feature, i]
+            else
+                output[node.r.feature, i]
+            end,
+            if node.r.has_constants
+                output[node.r.grad_ix, i]
+            else
+                output[1, i]
+            end,
+            Val((Int8(node.l.has_constants) << 1) | Int8(node.r.has_constants))
+        )
+        if node.l.has_constants
+            _backward_eval_diff_tree_array_cpu(node.l, cX, constants, operators, output)
+        end
+        if node.r.has_constants
+            _backward_eval_diff_tree_array_cpu(node.r, cX, constants, operators, output)
+        end
+    end
+end
+
+function eval_diff_tree_array_cpu(
+    tree::AbstractTensorExprNode{T,N},
+    cX::FlattenedTensorList{T,N,IXT,AT},
+    constants::FlattenedTensorList{T,N,IXT,AT},
+    operators::TensorOperatorEnum,
+    loss_op::Integer,
+    output::FlattenedTensorList{T,N,IXT,AT}
+) where {T,N,IXT,AT}
+
+    _forward_eval_diff_tree_array_cpu(tree, cX, constants, operators, output)
+    top = operators.binops[loss_op]
+    for i in 1:output.B
+        top.op!(
+            if tree.degree == 0 && tree.constant 
+                constants[tree.feature, 1]
+            elseif tree.degree == 0
+                cX[tree.feature, i]
+            else
+                output[tree.feature, i]
+            end, 
+            cX[length(cX.positions)], output[1, i]
+        )
+        top.gradient!(
+            output[1, i],
+            output[2, i],
+            if tree.degree == 0 && tree.constant 
+                constants[tree.feature, 1]
+            elseif tree.degree == 0
+                cX[tree.feature, i]
+            else
+                output[tree.feature, i]
+            end,
+            output[tree.grad_ix, i],
+            cX[length(cX.positions)],
+            cX[length(cX.positions)],
+            Val(0b11)
+        )
+    end
+    _backward_eval_diff_tree_array_cpu(tree, cX, constants, operators, output)
+
+end
+
+
+
+

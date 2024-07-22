@@ -840,21 +840,14 @@ Internal implementation of shape_inference. Its pseudocode looks like this:
     
 """
 function _shape_inference(
-    nodes::Vector{Node{AT}},
-    operators::O,
+    nodes::Vector{TensorNode{T,N}},
+    operators::TensorOperatorEnum,
     ::Val{M},
     ::Val{C},
     featureSizes::NTuple{K,NTuple{N,Int64}},
-) where {M,C,BT,N,K,O<:OperatorEnum,AT<:AbstractArray{BT,N}}
+) where {M,C,K,T,N}
 
-    # TODO: the dict fucks up if you have 2 constant nodes with the same value
-    # this could be solved by searching linearly in the array in reverse order starting from the parent
-    dict = Dict{Node{AT},Int64}()
-    solved = Dict{Node{AT},NTuple{N,Int64}}()
     final = fill(zero(ConstraintElem), N * length(nodes))
-    for i in eachindex(nodes)
-        dict[nodes[i]] = i
-    end
 
     # Adding all the constraints
     cs = Vector{Constraint{M,C}}()
@@ -882,7 +875,7 @@ function _shape_inference(
         end
     end
 
-         # print_constraints(cs)    
+    #=D=# # print_constraints(cs)    
 
     while length(cs) != 0
         should_continue = true
@@ -920,7 +913,7 @@ function _shape_inference(
                     dimi = mod(a_x - 1, N) + 1
                     ni = div(a_x - 1, N) + 1
                     error(
-                        "Node $(nodes[ni]) in dimension $(dimi) cannot have sizes $(final[a_x]) and $(nv)",
+                        "Node $(nnodesodes[ni]) in dimension $(dimi) cannot have sizes $(final[a_x]) and $(nv)",
                     )
                 end
                 cs[ci] = zero(Constraint{M,C})
@@ -991,8 +984,8 @@ function _shape_inference(
 end
 
 """
-    shape_inference(tree::Node{AT}, operators::O, featureSizes::NTuple{K,NTuple{N,Int64}}; throw_errors::Val{errors}=Val(false))
-        ::Tuple{Dict{Node{AT}, NTuple{N, Int64}}, Bool} where {errors,BT,N,K,O<:OperatorEnum,AT<:AbstractArray{BT,N}}
+    shape_inference(tree::TenosorNode{T,N}, operators::TensorOperatorEnum, featureSizes::NTuple{K,NTuple{N,Int64}}; ::Val{throw_errors}=Val(false))
+        ::Bool where {throw_errors,N,K,T}
 
 Infers the required shapes of every term in a tree, given the tree, the operation, 
 `featureSizes` (which contains the shapes of the inputs, with the shape of the output
@@ -1001,25 +994,35 @@ the expression is shape-consistent.
 If `throw_errors` is turned off, it will return an empty dictionary and false if it fails.
 """
 function shape_inference(
-    tree::Node{AT},
-    operators::O,
-    featureSizes::NTuple{K,NTuple{N,Int64}};
-    throw_errors::Val{errors}=Val(false),
-) where {errors,BT,N,K,O<:OperatorEnum,AT<:AbstractArray{BT,N}}
+    tree::TenosorNode{T,N},
+    operators::TensorOperatorEnum,
+    featureSizes::Union{NTuple{K,NTuple{N,Int64}}, AbstractVector{NTuple{N, Int64}}, FlattenedTensorList{T,N}};
+    ::Val{throw_errors}=Val(false),
+) where {throw_errors,N,K,T}
 
     # Flatten tree and create useful dictionaries
     M = max(MAX_M, N)
     C = MAX_C
+    KK = K
+    if featureSizes isa AbstractVector
+        KK = length(featureSizes)
+        featureSizes = ntuple(i -> featureSizes[i], Val(KK))
+    elseif featureSizes isa FlattenedTensorList
+        KK = length(featureSizes.positions)
+        featureSizes = ntuple(i -> featureSizes.positions[i][3], Val(KK))
+    end
 
     nodes = Node{AT}[]
     flatten_tree!(nodes, tree)
-    if errors
-        return _shape_inference(nodes, operators, Val(M), Val(C), featureSizes), true
+    if throw_errors
+        _shape_inference(nodes, operators, Val(M), Val(C), featureSizes)
+        return true
     else
         return try
-            _shape_inference(nodes, operators, Val(M), Val(C), featureSizes), true
+            _shape_inference(nodes, operators, Val(M), Val(C), featureSizes)
+            return true
         catch e
-            Dict{Node{AT},NTuple{N,Int64}}(), false
+            return false
         end
     end
 end
