@@ -7,11 +7,11 @@ const FTLPositionInfo = Tuple{IXT,IXT,NTuple{N,IXT},NTuple{N,IXT}} where {IXT,N}
 # The first axis is the batch axis. The second axis is the feature axis.
 # Different features can have diferent shapes, but along the batch axes, the shapes are the same.
 # The flattened representation also stores the batch axis last, so it shouldn't have problems with cache.
-struct FlattenedTensorList{T,N,IXT,AT<:AbstractVector{T}}
+struct FlattenedTensorList{T,N,IXT,AT<:AbstractVector{T},APosInfo<:AbstractVector{FTLPositionInfo{IXT,N}}}
     B::IXT # number of samples
     L::IXT # total length in Ts of each sample
     flattened::AT # A B*L array of Ts
-    positions::Vector{FTLPositionInfo{IXT,N}}
+    positions::APosInfo
     # for each feature:
     #   the index into the flattened array at which it starts at
     #   the length of the feature
@@ -19,20 +19,21 @@ struct FlattenedTensorList{T,N,IXT,AT<:AbstractVector{T}}
     #   N strides
 end
 
-function treat_as_flattened(buff::AT, sizes::Vector{NTuple{N, IXT}}) where {T,IXT,N,AT<:AbstractVector{T}}
+function treat_as_flattened(buff::AT, sizes::Vector{NTuple{N, IXT}}, max_B::Integer) where {T,IXT,N,AT<:AbstractVector{T}}
     positions = Vector{FTLPositionInfo{Int32,N}}(undef, f)
     map!(csize -> (0, prod(csize), csize, (1, cumprod(Base.front(csize))...)), positions, sizes)
     l = positions[end][1] + positions[end][2]
     b = div(length(buff), l)
-    return FlattenedTensorList{T,N,IXT,AT}(b, l, buff, positions)
+    b = min(b, max_B)
+    return FlattenedTensorList{T,N,IXT,AT,Vector{FTLPositionInfo{Int32,N}}}(b, l, buff, positions)
 end
 
-function flatten_cu(X::AbstractVector{<:AbstractArray{T,NP1}}) where {T,NP1}
+function flatten(::Type{AT}, X::AbstractVector{<:AbstractArray{T,NP1}}) where {T,NP1,AT<:AbstractArray}
     N = NP1-1
     B = size(X[1], 1)
     l = sum(Xi -> div(length(Xi), B), X)
     f = length(X)
-    flattened = Array{T,1}(undef, B*l)
+    flattened = Vector{T}(undef, B*l)
     positions = Vector{FTLPositionInfo{Int32,N}}(undef, f)
     map!(Xi -> (0, div(length(Xi), B), Base.tail(size(Xi)), div.(Base.tail(strides(Xi)),B)), positions, X)
     acum = 0
@@ -45,7 +46,7 @@ function flatten_cu(X::AbstractVector{<:AbstractArray{T,NP1}}) where {T,NP1}
         acum, fl, _, _ = positions[fi] 
         @view(flattened[(l*(bi-1)+acum+1):(l*(bi-1)+acum+fl)]) .= reshape(selectdim(X[fi], 1, bi), (fl,))
     end
-    return FlattenedTensorList{T, N, Int32, CuArray{T, 1, CUDA.Mem.DeviceBuffer}}(B, l, cu(flattened), positions)
+    return FlattenedTensorList{T, N, Int32, CuArray{T, 1, CUDA.Mem.DeviceBuffer}, Vector{FTLPositionInfo{Int32, N}}}(B, l, AT(flattened), positions)
 end
 
 # gets an element
@@ -137,18 +138,19 @@ function _forward_eval_diff_tree_array_cpu(
     constants::FlattenedTensorList{T,N,IXT,AT},
     operators::TensorOperatorEnum,
     output::FlattenedTensorList{T,N,IXT,AT},
+    batch_offset::Integer, batch_len
 ) where {T,N,IXT,AT}
     if tree.degree == 0
         return
     elseif tree.degree == 1
         top = operators.unaops[tree.op]
-        _forward_eval_diff_tree_array_cpu(node.l, cX, constants, operators, output)
-        for i in 1:output.B
+        _forward_eval_diff_tree_array_cpu(node.l, cX, constants, operators, output, batch_offset, batch_len)
+        for i in 1:batch_len
             top.op!(
                 if node.l.constant 
                     constants[node.l.feature, 1]
                 elseif node.l.degree == 0
-                    cX[node.l.feature, i]
+                    cX[node.l.feature, batch_offset+i]
                 else
                     output[node.l.feature, i]
                 end, 
@@ -157,21 +159,21 @@ function _forward_eval_diff_tree_array_cpu(
         end
     elseif tree.degree == 2
         top = operators.unaops[tree.op]
-        _forward_eval_diff_tree_array_cpu(node.l, cX, constants, operators, output)
-        _forward_eval_diff_tree_array_cpu(node.r, cX, constants, operators, output)
-        for i in 1:output.B
+        _forward_eval_diff_tree_array_cpu(node.l, cX, constants, operators, output, batch_offset, batch_len)
+        _forward_eval_diff_tree_array_cpu(node.r, cX, constants, operators, output, batch_offset, batch_len)
+        for i in 1:batch_len
             top.op!(
                 if node.l.constant 
                     constants[node.l.feature, 1]
                 elseif node.l.degree == 0
-                    cX[node.l.feature, i]
+                    cX[node.l.feature, batch_offset+i]
                 else
                     output[node.l.feature, i]
                 end, 
                 if node.r.constant 
                     constants[node.r.feature, 1]
                 elseif node.r.degree == 0
-                    cX[node.r.feature, i]
+                    cX[node.r.feature, batch_offset+i]
                 else
                     output[node.r.feature, i]
                 end,
@@ -187,17 +189,17 @@ function _backward_eval_diff_tree_array_cpu(
     constants::FlattenedTensorList{T,N,IXT,AT},
     operators::TensorOperatorEnum,
     output::FlattenedTensorList{T,N,IXT,AT},
+    batch_offset::Integer, batch_len
 ) where {T,N,IXT,AT}
     if tree.degree == 0
         if tree.constant
-            cX[tree.feature, 2] .= zero(T)
-            for i in 1:output.B
-                @. cX[tree.feature, 2] += output[tree.grad_ix, i] / convert(T, output.B)
+            for i in 1:batch_len
+                @. constants[tree.feature, 2] += output[tree.grad_ix, i] / convert(T, cX.B)
             end
         end
     elseif tree.degree == 1
         top = operators.unaops[tree.op]
-        for i in 1:output.B
+        for i in 1:batch_len
             top.grad!(
                 output[node.feature, i],
                 output[node.grad_ix, i],
@@ -211,7 +213,7 @@ function _backward_eval_diff_tree_array_cpu(
                 output[node.l.grad_ix, i]
             )
         end
-        _backward_eval_diff_tree_array_cpu(node.l, cX, constants, operators, output)
+        _backward_eval_diff_tree_array_cpu(node.l, cX, constants, operators, output, batch_offset, batch_len)
     elseif tree.degree == 2
         top = operators.unaops[tree.op]
         top.grad!(
@@ -220,7 +222,7 @@ function _backward_eval_diff_tree_array_cpu(
             if node.l.degree == 0 && node.l.constant 
                 constants[node.l.feature, 1]
             elseif node.l.degree == 0
-                cX[node.l.feature, i]
+                cX[node.l.feature, batch_offset+i]
             else
                 output[node.l.feature, i]
             end,
@@ -232,7 +234,7 @@ function _backward_eval_diff_tree_array_cpu(
             if node.r.degree == 0 && node.r.constant 
                 constants[node.r.feature, 1]
             elseif node.r.degree == 0
-                cX[node.r.feature, i]
+                cX[node.r.feature, batch_offset+i]
             else
                 output[node.r.feature, i]
             end,
@@ -244,12 +246,62 @@ function _backward_eval_diff_tree_array_cpu(
             Val((Int8(node.l.has_constants) << 1) | Int8(node.r.has_constants))
         )
         if node.l.has_constants
-            _backward_eval_diff_tree_array_cpu(node.l, cX, constants, operators, output)
+            _backward_eval_diff_tree_array_cpu(node.l, cX, constants, operators, output, batch_offset, batch_len)
         end
         if node.r.has_constants
-            _backward_eval_diff_tree_array_cpu(node.r, cX, constants, operators, output)
+            _backward_eval_diff_tree_array_cpu(node.r, cX, constants, operators, output, batch_offset, batch_len)
         end
     end
+end
+
+function _eval_diff_tree_array_cpu(
+    tree::AbstractTensorExprNode{T,N},
+    cX::FlattenedTensorList{T,N,IXT,AT},
+    constants::FlattenedTensorList{T,N,IXT,AT},
+    operators::TensorOperatorEnum,
+    loss_op::Integer,
+    output::FlattenedTensorList{T,N,IXT,AT},
+    batch_offset, batch_len
+) where {T,N,IXT,AT}
+
+    _forward_eval_diff_tree_array_cpu(tree, cX, constants, operators, output, batch_offset, batch_len)
+    top = operators.binops[loss_op]
+    bc = buffer_count(tree)
+    li = loss_gradient_index_in_buffer(tree)
+    for i in 1:batch_len
+        top.op!(
+            if tree.degree == 0 && tree.constant 
+                constants[tree.feature, 1]
+            elseif tree.degree == 0
+                cX[tree.feature, batch_offset + i]
+            else
+                output[tree.feature, i]
+            end, 
+            cX[length(cX.positions), batch_offset+i], 
+            output[1, i]
+        )
+        if li <= bc
+            top.gradient!(
+                output[1, i],
+                output[li, i],
+                if tree.degree == 0 && tree.constant 
+                    constants[tree.feature, 1]
+                elseif tree.degree == 0
+                    cX[tree.feature, i]
+                else
+                    output[tree.feature, i]
+                end,
+                output[tree.grad_ix, i],
+                cX[length(cX.positions), batch_offset+i],
+                cX[length(cX.positions), batch_offset+i],
+                Val(0b11)
+            )
+        end
+    end
+    if li <= bc
+        _backward_eval_diff_tree_array_cpu(tree, cX, constants, operators, output, batch_offset, batch_len)
+    end
+
 end
 
 function eval_diff_tree_array_cpu(
@@ -258,39 +310,46 @@ function eval_diff_tree_array_cpu(
     constants::FlattenedTensorList{T,N,IXT,AT},
     operators::TensorOperatorEnum,
     loss_op::Integer,
-    output::FlattenedTensorList{T,N,IXT,AT}
+    buffer::AbstarctVector{T}
 ) where {T,N,IXT,AT}
-
-    _forward_eval_diff_tree_array_cpu(tree, cX, constants, operators, output)
-    top = operators.binops[loss_op]
-    for i in 1:output.B
-        top.op!(
-            if tree.degree == 0 && tree.constant 
-                constants[tree.feature, 1]
-            elseif tree.degree == 0
-                cX[tree.feature, i]
-            else
-                output[tree.feature, i]
-            end, 
-            cX[length(cX.positions)], output[1, i]
-        )
-        top.gradient!(
-            output[1, i],
-            output[2, i],
-            if tree.degree == 0 && tree.constant 
-                constants[tree.feature, 1]
-            elseif tree.degree == 0
-                cX[tree.feature, i]
-            else
-                output[tree.feature, i]
-            end,
-            output[tree.grad_ix, i],
-            cX[length(cX.positions)],
-            cX[length(cX.positions)],
-            Val(0b11)
-        )
+    
+    recalculate_node_values!(tree, constants)
+    bc = buffer_count(tree)
+    li = loss_gradient_index_in_buffer(tree)
+    tempsizes = Vector{NTuple{N,Int32}}(undef, bc)
+    tempsizes[1] = ntuple(Returns(1), Val(N))
+    if li <= bc
+        tempsizes[li] = ntuple(Returns(1), Val(N))
     end
-    _backward_eval_diff_tree_array_cpu(tree, cX, constants, operators, output)
+    function recurse_set(node)
+        if degree == 2
+            recurse_set(node.l)
+            recurse_set(node.r)
+            tempsizes[node.feature] = node.shape
+            if node.constant
+                tempsizes[node.grad_ix] = node.shape
+            end
+        elseif node.degree == 1
+            recurse_set(node.l)
+            tempsizes[node.feature] = node.shape
+            if node.constant
+                tempsizes[node.grad_ix] = node.shape
+            end
+        else
+        end
+    end
+    recurse_set(tree)
+    output = treat_as_flattened(buffer, tempsizes, cX.B)
+
+    for i in eachindex(constants.positions)
+        @. constants[i, 2] = zero(T)
+    end
+
+    for i in 1:div(cX.B + output.B-1, output.B)
+        batch_offset = i*output.B
+        batch_len = min(cX.B - batch_offset, output.B)
+        _eval_diff_tree_array_cpu(tree, cX, constants, operators, loss_op, output, batch_offset, batch_len)
+    end
 
 end
 

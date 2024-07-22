@@ -142,51 +142,93 @@ end
 
 # renumbers the constants to be from 1 to C
 # this removes the information of the original constant indices
-function renumber_constants!(tree::AbstractTensorExprNode, cindex::Integer = 1)
-    if tree.degree == 2
-        cindex = renumber_constants!(tree.l, cindex)
-        cindex = renumber_constants!(tree.r, cindex)
-    elseif tree.degree == 1
-        cindex = renumber_constants!(tree.l, cindex)
-    elseif tree.degree == 0
-        if tree.constant
-            tree.feature = cindex
-            return cindex + 1
+function renumber_constants!(tree::AbstractTensorExprNode{T,N}, constants::FlattenedTensorList{T,N}) where {T,N}
+    function recurse(node, cindex)
+        if node.degree == 2
+            cindex = recurse(node.l, cindex)
+            cindex = recurse(node.r, cindex)
+        elseif node.degree == 1
+            cindex = recurse(node.l, cindex)
+        elseif node.degree == 0
+            if node.constant
+                node.feature = cindex
+                return cindex + 1
+            end
         end
     end
-    return cindex
+    max_consts = tree_mapreduce((n -> n.degree == 0 && n.constant ? n.feature : 0), max, tree)
+    count_consts = tree_mapreduce((n -> n.degree == 0 && n.constant ? 1 : 0), +, tree)
+    if max_consts == count_consts
+        return
+    else
+        error("Not yet implemented")
+        recurse(tree, 1)
+    end
 end
 
 # renumbers the nodes to be from 1 to the number of temporary nodes (meaning inputs and constants are not numbered)
 # this removes the information of the original constant indices
-function renumber_nodes!(tree::AbstractTensorExprNode, nindex::Integer = 1)
-    if tree.degree == 2
-        nindex = renumber_nodes!(tree.l, nindex)
-        nindex = renumber_nodes!(tree.r, nindex)
-        tree.feature = nindex
-        return nindex+1
-    elseif tree.degree == 1
-        nindex = renumber_nodes!(tree.l, nindex)
-        tree.feature = nindex
-        return nindex+1
-    elseif tree.degree == 0
-        return nindex
+function renumber_nodes!(tree::AbstractTensorExprNode)
+    function recurse(node, nindex) 
+        if node.degree == 2
+            nindex = recurse(node.l, nindex)
+            nindex = recurse(node.r, nindex)
+            node.feature = nindex
+            return nindex+1
+        elseif node.degree == 1
+            nindex = recurse(node.l, nindex)
+            node.feature = nindex
+            return nindex+1
+        elseif node.degree == 0
+            return nindex
+        end
     end
+    recurse(tree, 2)
+    return 1
 end
 
 # a the nodes to be from 1 to the number of temporary nodes (meaning inputs and constants are not numbered)
 # this removes the information of the original constant indices
+@inline loss_gradient_index_in_buffer(tree) = tree_mapreduce((n -> n.degree == 0 ? 1 : n.feature), max, tree) + 1
+@inline buffer_count(tree) = tree_mapreduce((n -> max(n.grad_ix, n.degree == 0 ? 1 : n.feature)), max, tree)
+
 function recalculate_has_constants!(tree::AbstractTensorExprNode)
     if tree.degree == 2
         recalculate_has_constants!(tree.l)
         recalculate_has_constants!(tree.r)
-        tree.has_constants = tree.l.has_constants && tree.r.has_constants
+        tree.constant = tree.l.constant || tree.r.constant
     elseif tree.degree == 1
         recalculate_has_constants!(tree.l)
-        tree.has_constants = tree.l.has_constants
-    elseif tree.degree == 0
-        tree.has_constants = tree.constant
+        tree.constant = tree.l.constant
     end
+end
+
+function renumber_gradients!(tree::AbstractTensorExprNode)
+    li = loss_gradient_index_in_buffer(tree)
+    # maxf - maximum feature so far, 1 if no features
+    function recurse(node, ix)
+        if !node.constant
+            node.grad_ix = 0
+            return ix 
+        end
+        if node.degree == 1
+            recurse(node.l, ix)
+        elseif node.degree == 2
+            recurse(node.l, ix)
+        end
+        node.grad_ix = ix
+        return ix+1
+    end
+    recurse(tree, li+1)
+    return li
+end
+
+function recalculate_node_values!(tree::AbstractTensorExprNode{T,N}, constants::FlattenedTensorList{T,N}) where {T,N}
+    # TODO: when constants are renumbered, the constants array must do the corresponding swap
+    renumber_constants!(tree, constants)
+    recalculate_has_constants!(tree)
+    renumber_nodes!(tree)
+    renumber_gradients!(tree)
 end
 
 ## Assign index to nodes of a tree

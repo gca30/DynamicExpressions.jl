@@ -165,21 +165,31 @@ Default implementation of AbstractTensorExprNode{T,N}.
 
 """
 mutable struct TensorNode{T,N} <: AbstractTensorExprNode{T,N}
-    # actual node values
-    degree::UInt8 # 0 for constant/variable, 1 for cos/sin, 2 for +/* etc.
-    constant::Bool # false if variable
-    feature::UInt16 # This stores the feature index for inputs, 
-    # the index in the constants array for constants
-    # the index in the temporary array for non-leaf nodes
+    degree::UInt8 
+        # 0 for constant/variable
+        # 1 for cos/sin
+        # 2 for +/* etc.
+    constant::Bool 
+        # If it is a leaf node, stores whether it is a constant or a variable
+        # If not, stores whether there is any constant down the tree
+    feature::UInt16 
+        # This stores the feature index for inputs 
+        # the index in the constants array for constants
+        # the index in the temporary array for non-leaf nodes
+    shape::NTuple{N,Int32} 
+        # The shape of the output
+
     # ------------------- (possibly undefined below)
-    op::UInt8  # If operator, this is the index of the operator in operators.binops, or operators.unaops
-    l::TensorNode{T,N}  # Left child node. Only defined for degree=1 or degree=2.
-    r::TensorNode{T,N}  # Right child node. Only defined for degree=2.
-    # ------------------- (extra tensor information, might store them elsewhere, TODO)
-    shape::NTuple{N,Int32} # The shape of the output
-    grad_ix::Int16 # index of the gradient in the flattened array
-    has_constants::Bool # Has constants below branch (true for constants)
-    # ix::Int64 # index of the tensor in the flattened array
+
+    grad_ix::Int16 
+        # index of the gradient in the flattened temporary array
+    op::UInt8  
+        # If operator, this is the index of the operator in operators.binops, or operators.unaops
+    l::TensorNode{T,N}  
+        # Left child node. Only defined for degree=1 or degree=2.
+    r::TensorNode{T,N}  
+        # Right child node. Only defined for degree=2.
+    
     TensorNode{_T,_N}() where {_T,_N} = new{_T,_N}()
 end
 
@@ -422,6 +432,7 @@ end
     n.degree = 1
     n.op = op
     n.l = l
+    n.constant = l.constant
     return n
 end
 """Create a binary operator node."""
@@ -434,6 +445,7 @@ end
     n.op = op
     n.l = T2 === T ? l : convert(with_type_parameters(N, T), l)
     n.r = T3 === T ? r : convert(with_type_parameters(N, T), r)
+    n.constant = l.constant || r.constant
     return n
 end
 
