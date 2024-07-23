@@ -65,14 +65,14 @@ broadcast_unaop(op::Fnum; op_complexity=1) where {Fnum} = TensorOperator(
         map!(first, ∂l, gradient.(op, l))
         @. ∂l *= ∂res 
     end,
-    () -> error("Shape inference not yet defined"),
+    append_constraints_unary_all_equal,
     sl -> length(sl) * op_complexity
 )
 
 broadcast_binop(op::Fnum; op_complexity=1) where {Fnum} = TensorOperator(
     (l, r, res) -> (@. res = op(l, r)),
     # (l, r, res) -> (@. res = op(l, r)),
-    (res, ∂res, l, ∂l, r, ∂r, Val(comp)) where {comp} -> begin
+    function(res, ∂res, l, ∂l, r, ∂r, Val(comp)) where {comp}
         grads = gradient.(op, l, r)
         if comp & 0b10
             sum!(∂l, ∂res .* map(x->x[1], grads))
@@ -81,7 +81,7 @@ broadcast_binop(op::Fnum; op_complexity=1) where {Fnum} = TensorOperator(
             sum!(∂r, ∂res .* map(x->x[2], grads))
         end
     end,
-    () -> error("Shape inference not yet defined"),
+    append_constraints_broadcasting,
     (sl, sr) -> 
         prod(ntuple(i -> max(sl[i], sr[i]), Val(length(sl)))) * op_complexity
 )

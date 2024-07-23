@@ -346,7 +346,7 @@ function print_constraints(cs::Vector{Constraint{C,M}}) where {C,M}
     return println()
 end
 
-function print_tree(nodes::AbstractVector{Node{AT}}) where {T,N,AT<:AbstractArray{T,N}}
+function print_tree(nodes::AbstractVector{TensorNode{T,N}}) where {T,N}
     println("------- FLATTENED TREE --------")
     for i in eachindex(nodes)
         parensd((i - 1) * N .+ collect(1:N), ix -> "a" * to_subscript_str(ix), stdout)
@@ -356,8 +356,8 @@ function print_tree(nodes::AbstractVector{Node{AT}}) where {T,N,AT<:AbstractArra
 end
 
 function print_final(
-    final::AbstractVector{ConstraintElem}, nodes::AbstractVector{Node{AT}}
-) where {N,BT,AT<:AbstractArray{BT,N}}
+    final::AbstractVector{ConstraintElem}, nodes::AbstractVector{TensorNode{T,N}}
+) where {N,T}
     println("------- SOLVED SO FAR --------")
     for i in eachindex(nodes)
         println(nodes[i], " -> ", ntuple(j -> final[(i - 1) * N + j], Val(N)))
@@ -366,8 +366,8 @@ function print_final(
 end
 
 function flatten_tree!(
-    v::Vector{Node{AT}}, tree::Node{AT}
-) where {BT,N,AT<:AbstractArray{BT,N}}
+    v::Vector{NodeT}, tree::NodeT
+) where {NodeT <: AbstractNode}
     if tree.degree == 0
         push!(v, tree)
     elseif tree.degree == 1
@@ -539,32 +539,31 @@ function append_constraints!(
     end
 end
 
-function inside_substitution(
-    c::Constraint{M,C},
-    cs::Vector{Constraint{M,C}},
-    nodes::Vector{Node{AT}},
-    solved::Dict{Node{AT},NTuple{N,Int64}}
-)::Bool where {M,C,AT,N}
-    effM, effC = effective_M(c), effective_C(c)
-    !(effM == 1 && effC == 1) && return false
-    a_x_index = findfirst(!=(0), c.indices)
-    set_index = findfirst(s -> s[a_x_index].value != 0, c.consSets)
-    !(c.consSets[set_index][a_x_index].isConstant) && return false
-    @show a_x_index
-    @show set_index
-    a_x = c.indices[a_x_index]
-    value = c.consSets[set_index][a_x_index].value
-    node = nodes[div(a_x - 1, N) + 1]
-    #=D=# # println("Applying substitution ", c)    
-    if solved[node][mod(a_x - 1, N) + 1] != 0
-        #=D=# # println(map(node -> solved[node], nodes))        
-        error("Already set " * string(solved[node]))
-    end
-    map!(cst -> resolve_set_value(cst, a_x, value), cs, cs)
-    #=D=# # print_constraints(cs)    
-    solved[node] = setNth(solved[node], UInt64(mod(a_x - 1, N) + 1), Int64(value))
-    return true
-end
+# function inside_substitution(
+#     c::Constraint{M,C},
+#     cs::Vector{Constraint{M,C}},
+#     nodes::Vector{TensorNode{T,N}},
+# )::Bool where {M,C,AT,N}
+#     effM, effC = effective_M(c), effective_C(c)
+#     !(effM == 1 && effC == 1) && return false
+#     a_x_index = findfirst(!=(0), c.indices)
+#     set_index = findfirst(s -> s[a_x_index].value != 0, c.consSets)
+#     !(c.consSets[set_index][a_x_index].isConstant) && return false
+#     @show a_x_index
+#     @show set_index
+#     a_x = c.indices[a_x_index]
+#     value = c.consSets[set_index][a_x_index].value
+#     node = nodes[div(a_x - 1, N) + 1]
+#     #=D=# # println("Applying substitution ", c)    
+#     if solved[node][mod(a_x - 1, N) + 1] != 0
+#         #=D=# # println(map(node -> solved[node], nodes))        
+#         error("Already set " * string(solved[node]))
+#     end
+#     map!(cst -> resolve_set_value(cst, a_x, value), cs, cs)
+#     #=D=# # print_constraints(cs)    
+#     solved[node] = setNth(solved[node], UInt64(mod(a_x - 1, N) + 1), Int64(value))
+#     return true
+# end
 
 function splitting(
     c::Constraint{M,C}, cs::Vector{Constraint{M,C}}, ci::Int64
@@ -743,7 +742,7 @@ Does one iteration of the shape inference process, defined as:
 function inference_iteration(
     cs::AbstractVector{Constraint{M,C}},
     final::AbstractVector{ConstraintElem},
-    nodes::AbstractVector{Node{AT}},
+    nodes::AbstractVector{TensorNode{AT}},
 ) where {M,C,N,BT,AT<:AbstractArray{BT,N}}
     should_continue = true
     iterations = 0
@@ -825,7 +824,7 @@ function inference_iteration(
 end
 
 """
-    _shape_inference(nodes::Vector{Node{AT}}, operators::O, ::Val{M}, ::Val{C}, featureSizes::NTuple{K,NTuple{N,Int64}})::Dict{Node{AT}, NTuple{N, Int64}} where {M,C,BT,N,K,O<:OperatorEnum,AT<:AbstractArray{BT,N}}
+    _shape_inference(nodes::Vector{TensorNode{T,N}}, operators::O, ::Val{M}, ::Val{C}, featureSizes::NTuple{K,NTuple{N,Int64}}) where {M,C,BT,N,K,O<:OperatorEnum,AT<:AbstractArray{BT,N}}
 
 Internal implementation of shape_inference. Its pseudocode looks like this:
 
@@ -1012,7 +1011,7 @@ function shape_inference(
         featureSizes = ntuple(i -> featureSizes.positions[i][3], Val(KK))
     end
 
-    nodes = Node{AT}[]
+    nodes = TensorNode{T,N}[]
     flatten_tree!(nodes, tree)
     if throw_errors
         _shape_inference(nodes, operators, Val(M), Val(C), featureSizes)

@@ -100,37 +100,37 @@ end
 #   the operator will have a macro that takes a number from 1:threads and returns what to do in that thread
 #   a macro is necesary so that the gpu kernel compiles instead of calling functions (which might not work on the gpu)
 
-function eval_tree_array_cpu(
-    tree::AbstractTensorExprNode{T,N},
-    cX::FlattenedTensorList{T,N,IXT,AT},
-    constants::FlattenedTensorList{T,N,IXT,AT},
-    operators::TensorOperatorEnum
-) where {T,N,IXT,AT}
+# function eval_tree_array_cpu(
+#     tree::AbstractTensorExprNode{T,N},
+#     cX::FlattenedTensorList{T,N,IXT,AT},
+#     constants::FlattenedTensorList{T,N,IXT,AT},
+#     operators::TensorOperatorEnum
+# ) where {T,N,IXT,AT}
 
-    if tree.degree == 0
-        if tree.constant
-            # value
-            return constants[tree.feature]
-        else
-            # input
-            return cX[tree.feature]
-        end
-    elseif tree.degree == 1
-        top = operators.unaops[tree.op]
-        inner = eval_tree_array_cpu(tree.l, cX, constants, operator)
-        outer = Array{T, N+1}(undef, tree.shape..., size(inner, N+1))
-        top.op!(inner, outer)
-        return outer
-    elseif tree.degree == 2
-        top = operators.binops[tree.op]
-        inner_l = eval_tree_array_cpu(tree.l, cX, constants, operator)
-        inner_r = eval_tree_array_cpu(tree.r, cX, constants, operator)
-        outer = Array{T, N+1}(undef, tree.shape..., max(size(inner_l, N+1), size(inner_r, N+1)))
-        top.op!(inner_l, inner_r, outer)
-        return outer
-    end
+#     if tree.degree == 0
+#         if tree.constant
+#             # value
+#             return constants[tree.feature]
+#         else
+#             # input
+#             return cX[tree.feature]
+#         end
+#     elseif tree.degree == 1
+#         top = operators.unaops[tree.op]
+#         inner = eval_tree_array_cpu(tree.l, cX, constants, operator)
+#         outer = Array{T, N+1}(undef, tree.shape..., size(inner, N+1))
+#         top.op!(inner, outer)
+#         return outer
+#     elseif tree.degree == 2
+#         top = operators.binops[tree.op]
+#         inner_l = eval_tree_array_cpu(tree.l, cX, constants, operator)
+#         inner_r = eval_tree_array_cpu(tree.r, cX, constants, operator)
+#         outer = Array{T, N+1}(undef, tree.shape..., max(size(inner_l, N+1), size(inner_r, N+1)))
+#         top.op!(inner_l, inner_r, outer)
+#         return outer
+#     end
 
-end
+# end
 
 function _forward_eval_diff_tree_array_cpu(
     node::AbstractTensorExprNode{T,N},
@@ -353,6 +353,198 @@ function eval_diff_tree_array_cpu(
 
 end
 
+function _eval_tree_array_cpu(
+    tree::AbstractTensorExprNode{T,N},
+    cX::FlattenedTensorList{T,N,IXT,AT},
+    constants::FlattenedTensorList{T,N,IXT,AT},
+    operators::TensorOperatorEnum,
+    loss_op::Integer,
+    output::FlattenedTensorList{T,N,IXT,AT},
+    batch_offset, batch_len
+) where {T,N,IXT,AT}
+    _forward_eval_diff_tree_array_cpu(tree, cX, constants, operators, output, batch_offset, batch_len)
+    top = operators.binops[loss_op]
+    for i in 1:batch_len
+        top.op!(
+            if tree.degree == 0 && tree.constant 
+                constants[tree.feature, 1]
+            elseif tree.degree == 0
+                cX[tree.feature, batch_offset + i]
+            else
+                output[tree.feature, i]
+            end, 
+            cX[length(cX.positions), batch_offset+i], 
+            output[1, i]
+        )
+    end
+end
+
+function eval_tree_array_cpu(
+    tree::AbstractTensorExprNode{T,N},
+    cX::FlattenedTensorList{T,N,IXT,AT},
+    constants::FlattenedTensorList{T,N,IXT,AT},
+    operators::TensorOperatorEnum,
+    loss_op::Integer,
+    buffer::AbstarctVector{T}
+) where {T,N,IXT,AT}
+    recalculate_node_values!(tree, constants)
+    bc = loss_gradient_index_in_buffer(tree)-1
+    tempsizes = Vector{NTuple{N,Int32}}(undef, bc)
+    tempsizes[1] = ntuple(Returns(1), Val(N))
+    function recurse_set(node)
+        if degree == 2
+            recurse_set(node.l)
+            recurse_set(node.r)
+            tempsizes[node.feature] = node.shape
+        elseif node.degree == 1
+            recurse_set(node.l)
+            tempsizes[node.feature] = node.shape
+        end
+    end
+    recurse_set(tree)
+    output = treat_as_flattened(buffer, tempsizes, cX.B)
+
+    for i in 1:div(cX.B + output.B-1, output.B)
+        batch_offset = i*output.B
+        batch_len = min(cX.B - batch_offset, output.B)
+        _eval_diff_tree_array_cpu(tree, cX, constants, operators, loss_op, output, batch_offset, batch_len)
+    end
+end
+
+struct GPUInstruction
+    
+    degree::Int8
+    op::Int8
+    opv::Int8 # 0 for direct operation, 1 for left derivative, 2 for right derivative, 3 for direct and left derivative
+
+    l_source::Int8 # 0 for temporary array, 1 for inputs array, 2 for constants array
+    r_source::Int8
+    
+    l_index::Int16
+    r_index::Int16
+    
+    dl_index::Int16
+    dr_index::Int16
+
+    result::Int16
+    dresult::Int16
+
+    threads::Int32
+
+end
+
+function count_layers(tree::AbstractNode)
+    if tree.degree == 1
+        return count_layers(tree.l)+1
+    elseif tree.degree == 2
+        return max(count_layers(tree.l), count_layers(tree.r))+1
+    elseif tree.degree == 0
+        return 0
+    end
+end
+
+function count_grad_layers(tree::AbstractNode)
+    if !tree.constant
+        return 0
+    elseif tree.degree == 1
+        return count_grad_layers(tree.l)+1
+    elseif tree.degree == 2
+        return max(count_layers(tree.l), count_layers(tree.r)) + 1
+    elseif tree.degree == 0
+        return 1
+    end
+end
+
+function eval_diff_tree_array_gpu(
+    tree::AbstractTensorExprNode{T,N},
+    cX::FlattenedTensorList{T,N,IXT,AT},
+    constants::FlattenedTensorList{T,N,IXT,AT},
+    operators::TensorOperatorEnum,
+    loss_op::Integer,
+    buffer::AbstarctVector{T}
+) where {T,N,IXT,AT}
+    recalculate_node_values!(tree, constants)
+    # trees have layers, just like ogres
+    layers = count_layers(tree)
+    grad_layers = count_grad_layers(tree)
+    instructions = [GPUInstruction[] for _ in 1:(layers+grad_layers)]
+    li = loss_gradient_index_in_buffer(tree)
+
+    get_source(node) = node.degree == 0 ? (node.constant ? 2 : 1) : 0
+    function recurse_layers_up(node::AbstractNode)
+        layer = if node.degree == 1
+            recurse_layers(node.l)+1
+        elseif node.degree == 2
+            max(recurse_layers(node.l), recurse_layers(node.r))+1
+        elseif node.degree == 0
+            0
+        end
+        if node.degree != 0
+            instructions[layer].push!(GPUInstruction(
+                node.degree, node.op, 0,
+                get_source(node.l), node.degree == 2 ? get_source(node.r) : 0, 
+                node.l.feature, node.degree == 2 ? node.r.feature : 0, 0, 0,
+                node.feature, 0,
+                100
+            ))
+        end
+        return layer
+    end
+    function recurse_layers_down(node::AbstractNode)
+        if !node.constant
+            return 0
+        end
+        grad_layer = if node.degree == 1
+            count_grad_layers(node.l)+1
+        elseif node.degree == 2
+            max(count_layers(node.l), count_layers(node.r)) + 1
+        elseif node.degree == 0
+            1
+        end
+        if node.degree == 1
+            instructions[layers+grad_layers+2-grad_layer].push!(GPUInstruction(
+                node.degree, node.op, 1,
+                get_source(node.l), 0, 
+                node.l.feature, 0, node.l.grad_ix, 0,
+                node.feature, node.grad_ix,
+                100
+            ))
+        elseif node.degree == 2
+            if node.l.constant
+                instructions[layers+grad_layers+2-grad_layer].push!(GPUInstruction(
+                    node.degree, node.op, 1,
+                    get_source(node.l), 2, 
+                    node.l.feature, node.r.feature, node.l.grad_ix, node.r.grad_ix,
+                    node.feature, node.grad_ix,
+                    100
+                ))
+            end
+            if node.r.constant
+                instructions[layers+grad_layers+2-grad_layer].push!(GPUInstruction(
+                    node.degree, node.op, 2,
+                    get_source(node.l), 2, 
+                    node.l.feature, node.r.feature, node.l.grad_ix, node.r.grad_ix,
+                    node.feature, node.grad_ix,
+                    100
+                ))
+            end
+        elseif node.degree == 0
+        end
+        return grad_layer
+    end
+    recurse_layers_up(tree)
+    recurse_layers_down(tree)
+    instructions[layers+1].push!(GPUInstruction(
+        2, loss_op, 3,
+        get_source(tree.l), 1,
+        tree.feature, length(cX.positions),
+        tree.grad_ix, 0,
+        1, 0,
+        100
+    ))
+    
+    
+end
 
 
 
