@@ -3,7 +3,7 @@ module OperatorEnumConstructionModule
 using DispatchDoctor: @unstable
 
 import ..OperatorEnumModule: AbstractOperatorEnum, OperatorEnum, GenericOperatorEnum
-import ..NodeModule: Node, GraphNode, AbstractExpressionNode, constructorof
+import ..NodeModule: Node, GraphNode, AbstractScalarExprNode, constructorof
 import ..StringsModule: string_tree
 import ..EvaluateModule: eval_tree_array, OPERATOR_LIMIT_BEFORE_SLOWDOWN
 import ..EvaluateDerivativeModule: eval_grad_tree_array, _zygote_gradient
@@ -35,7 +35,7 @@ const ALREADY_DEFINED_BINARY_OPERATORS = (;
 const LATEST_VARIABLE_NAMES = Ref{Vector{String}}(String[])
 const LATEST_LOCK = Threads.SpinLock()
 
-function Base.show(io::IO, tree::AbstractExpressionNode)
+function Base.show(io::IO, tree::AbstractScalarExprNode)
     latest_operators_type = LATEST_OPERATORS_TYPE.x
     kwargs = (variable_names=LATEST_VARIABLE_NAMES.x,)
     if latest_operators_type == IsNothing
@@ -48,10 +48,10 @@ function Base.show(io::IO, tree::AbstractExpressionNode)
         return print(io, string_tree(tree, latest_operators; kwargs...))
     end
 end
-@unstable function (tree::AbstractExpressionNode)(X; kws...)
+@unstable function (tree::AbstractScalarExprNode)(X; kws...)
     Base.depwarn(
         "The `tree(X; kws...)` syntax is deprecated. Use `tree(X, operators; kws...)` instead.",
-        :AbstractExpressionNode,
+        :AbstractScalarExprNode,
     )
     latest_operators_type = LATEST_OPERATORS_TYPE.x
 
@@ -67,10 +67,10 @@ end
     end
 end
 
-@unstable function _grad_evaluator(tree::AbstractExpressionNode, X; kws...)
+@unstable function _grad_evaluator(tree::AbstractScalarExprNode, X; kws...)
     Base.depwarn(
         "The `tree'(X; kws...)` syntax is deprecated. Use `tree'(X, operators; kws...)` instead.",
-        :AbstractExpressionNode,
+        :AbstractScalarExprNode,
     )
     latest_operators_type = LATEST_OPERATORS_TYPE.x
     # return _grad_evaluator(tree, X, $operators; kws...)
@@ -149,20 +149,20 @@ function _extend_unary_operator(
     f_inside::Symbol, f_outside::Symbol, type_requirements, internal
 )
     quote
-        @gensym _constructorof _AbstractExpressionNode
+        @gensym _constructorof _AbstractScalarExprNode
         quote
             if $$internal
                 import ..NodeModule.constructorof as $_constructorof
-                import ..NodeModule.AbstractExpressionNode as $_AbstractExpressionNode
+                import ..NodeModule.AbstractScalarExprNode as $_AbstractScalarExprNode
             else
                 using DynamicExpressions:
                     constructorof as $_constructorof,
-                    AbstractExpressionNode as $_AbstractExpressionNode
+                    AbstractScalarExprNode as $_AbstractScalarExprNode
             end
 
             function $($f_outside)(
                 l::N
-            ) where {T<:$($type_requirements),N<:$_AbstractExpressionNode{T}}
+            ) where {T<:$($type_requirements),N<:$_AbstractScalarExprNode{T}}
                 return if (l.degree == 0 && l.constant)
                     $_constructorof(N)(T; val=$($f_inside)(l.val))
                 else
@@ -178,20 +178,20 @@ function _extend_binary_operator(
     f_inside::Symbol, f_outside::Symbol, type_requirements, build_converters, internal
 )
     quote
-        @gensym _constructorof _AbstractExpressionNode
+        @gensym _constructorof _AbstractScalarExprNode
         quote
             if $$internal
                 import ..NodeModule.constructorof as $_constructorof
-                import ..NodeModule.AbstractExpressionNode as $_AbstractExpressionNode
+                import ..NodeModule.AbstractScalarExprNode as $_AbstractScalarExprNode
             else
                 using DynamicExpressions:
                     constructorof as $_constructorof,
-                    AbstractExpressionNode as $_AbstractExpressionNode
+                    AbstractScalarExprNode as $_AbstractScalarExprNode
             end
 
             function $($f_outside)(
                 l::N, r::N
-            ) where {T<:$($type_requirements),N<:$_AbstractExpressionNode{T}}
+            ) where {T<:$($type_requirements),N<:$_AbstractScalarExprNode{T}}
                 if (l.degree == 0 && l.constant && r.degree == 0 && r.constant)
                     $_constructorof(N)(T; val=$($f_inside)(l.val, r.val))
                 else
@@ -201,7 +201,7 @@ function _extend_binary_operator(
             end
             function $($f_outside)(
                 l::N, r::T
-            ) where {T<:$($type_requirements),N<:$_AbstractExpressionNode{T}}
+            ) where {T<:$($type_requirements),N<:$_AbstractScalarExprNode{T}}
                 if l.degree == 0 && l.constant
                     $_constructorof(N)(T; val=$($f_inside)(l.val, r))
                 else
@@ -213,7 +213,7 @@ function _extend_binary_operator(
             end
             function $($f_outside)(
                 l::T, r::N
-            ) where {T<:$($type_requirements),N<:$_AbstractExpressionNode{T}}
+            ) where {T<:$($type_requirements),N<:$_AbstractScalarExprNode{T}}
                 if r.degree == 0 && r.constant
                     $_constructorof(N)(T; val=$($f_inside)(l, r.val))
                 else
@@ -226,7 +226,7 @@ function _extend_binary_operator(
             if $($build_converters)
                 # Converters:
                 function $($f_outside)(
-                    l::$_AbstractExpressionNode{T1}, r::$_AbstractExpressionNode{T2}
+                    l::$_AbstractScalarExprNode{T1}, r::$_AbstractScalarExprNode{T2}
                 ) where {T1<:$($type_requirements),T2<:$($type_requirements)}
                     if l isa GraphNode || r isa GraphNode
                         error(
@@ -238,12 +238,12 @@ function _extend_binary_operator(
                 end
 
                 function $($f_outside)(
-                    l::$_AbstractExpressionNode{T1}, r::T2
+                    l::$_AbstractScalarExprNode{T1}, r::T2
                 ) where {T1<:$($type_requirements),T2<:$($type_requirements)}
                     return $($f_outside)(l, convert(T1, r))
                 end
                 function $($f_outside)(
-                    l::T1, r::$_AbstractExpressionNode{T2}
+                    l::T1, r::$_AbstractScalarExprNode{T2}
                 ) where {T1<:$($type_requirements),T2<:$($type_requirements)}
                     return $($f_outside)(convert(T2, l), r)
                 end
@@ -415,8 +415,8 @@ end
                    empty_old_operators::Bool=true)
 
 Construct an `OperatorEnum` object, defining the possible expressions. This will also
-redefine operators for `AbstractExpressionNode` types, as well as `show`, `print`, and
-`(::AbstractExpressionNode)(X)`. It will automatically compute derivatives with `Zygote.jl`.
+redefine operators for `AbstractScalarExprNode` types, as well as `show`, `print`, and
+`(::AbstractScalarExprNode)(X)`. It will automatically compute derivatives with `Zygote.jl`.
 
 # Arguments
 - `binary_operators::Vector{Function}`: A vector of functions, each of which is a binary
@@ -477,8 +477,8 @@ end
 
 Construct a `GenericOperatorEnum` object, defining possible expressions.
 Unlike `OperatorEnum`, this enum one will work arbitrary operators and data types.
-This will also redefine operators for `AbstractExpressionNode` types, as well as `show`, `print`,
-and `(::AbstractExpressionNode)(X)`.
+This will also redefine operators for `AbstractScalarExprNode` types, as well as `show`, `print`,
+and `(::AbstractScalarExprNode)(X)`.
 
 # Arguments
 - `binary_operators::Vector{Function}`: A vector of functions, each of which is a binary

@@ -3,7 +3,7 @@ module ExpressionModule
 
 using DispatchDoctor: @unstable
 
-using ..NodeModule: AbstractExpressionNode, AbstractTensorExpressionNode, Node, TensorNode
+using ..NodeModule: AbstractScalarExprNode, AbstractTensorExprNode, Node, TensorNode
 using ..OperatorEnumModule: AbstractOperatorEnum, OperatorEnum
 using ..UtilsModule: Undefined
 using ..ChainRulesModule: NodeTangent
@@ -76,7 +76,7 @@ expression tree (like `Node`) along with associated metadata for evaluation and 
 
 # Constructors
 
-- `Expression(tree::AbstractExpressionNode, metadata::NamedTuple)`: Construct from the fields
+- `Expression(tree::AbstractScalarExprNode, metadata::NamedTuple)`: Construct from the fields
 - `@parse_expression(expr, operators=operators, variable_names=variable_names, node_type=Node)`: Parse a Julia expression with a given context and create an Expression object.
 
 # Usage
@@ -84,18 +84,18 @@ expression tree (like `Node`) along with associated metadata for evaluation and 
 This type is intended for end-users to interact with and manipulate expressions at a high level,
 abstracting away the complexities of the underlying expression tree operations.
 """
-struct Expression{T,N<:AbstractExpressionNode{T},D<:NamedTuple} <: AbstractExpression{T,N,0}
+struct Expression{T,N<:AbstractScalarExprNode{T},D<:NamedTuple} <: AbstractExpression{T,N,0}
     tree::N
     metadata::Metadata{D}
 end
 
-struct TensorExpression{T,N,ArrayT<:AbstractArray{T,N},NodeT<:AbstractTensorExpressionNode{T,N},D<:NamedTuple} <: AbstractExpression{T,NodeT,N}
+struct TensorExpression{T,N,ArrayT<:AbstractArray{T,N},NodeT<:AbstractTensorExprNode{T,N},D<:NamedTuple} <: AbstractExpression{T,NodeT,N}
     tree::NodeT
     constants::Vector{ArrayT}
     metadata::Metadata{D}
 end
 
-@inline function Expression(tree::AbstractExpressionNode{T}; metadata...) where {T}
+@inline function Expression(tree::AbstractScalarExprNode{T}; metadata...) where {T}
     d = (; metadata...)
     return Expression(tree, Metadata(d))
 end
@@ -140,7 +140,7 @@ end
     get_tree(ex::AbstractExpression)
 
 A method that extracts the expression tree from `AbstractExpression`
-and should return an `AbstractExpressionNode`.
+and should return an `AbstractScalarExprNode`.
 """
 function get_tree(ex::AbstractExpression)
     return error("`get_tree` function must be implemented for $(typeof(ex)) types.")
@@ -174,7 +174,7 @@ end
 ########################################################
 
 """
-    with_contents(ex::AbstractExpression, tree::AbstractExpressionNode)
+    with_contents(ex::AbstractExpression, tree::AbstractScalarExprNode)
     with_contents(ex::AbstractExpression, tree::AbstractExpression)
 
 Create a new expression based on `ex` but with a different `tree`
@@ -210,7 +210,7 @@ function preserve_sharing(::Union{E,Type{E}}) where {T,N,E<:AbstractExpression{T
 end
 
 function get_operators(
-    tree::AbstractExpressionNode, operators::Union{AbstractOperatorEnum,Nothing}=nothing
+    tree::AbstractScalarExprNode, operators::Union{AbstractOperatorEnum,Nothing}=nothing
 )
     if operators === nothing
         throw(ArgumentError("`operators` must be provided for $(typeof(tree)) types."))
@@ -231,7 +231,7 @@ end
 function get_tree(ex::Expression)
     return ex.tree
 end
-function get_tree(tree::AbstractExpressionNode)
+function get_tree(tree::AbstractScalarExprNode)
     return tree
 end
 function Base.copy(ex::Expression; break_sharing::Val=Val(false))
@@ -244,7 +244,7 @@ function Base.:(==)(x::AbstractExpression, y::AbstractExpression)
     return get_contents(x) == get_contents(y) && get_metadata(x) == get_metadata(y)
 end
 
-# Overload all methods on AbstractExpressionNode that return an aggregation, or can
+# Overload all methods on AbstractScalarExprNode that return an aggregation, or can
 # return an entire tree. Methods that only return the nodes are *not* overloaded, so
 # that the user must use the low-level interface.
 
@@ -293,7 +293,7 @@ function set_scalar_constants!(ex::Expression{T}, constants, refs) where {T}
 end
 function extract_gradient(
     gradient::@NamedTuple{tree::NT, metadata::Nothing}, ex::Expression{T,N}
-) where {T,N<:AbstractExpressionNode{T},NT<:NodeTangent{T,N}}
+) where {T,N<:AbstractScalarExprNode{T},NT<:NodeTangent{T,N}}
     # TODO: This messy gradient type is produced by ChainRules. There is probably a better way to do this.
     return extract_gradient(gradient.tree, get_tree(ex))
 end

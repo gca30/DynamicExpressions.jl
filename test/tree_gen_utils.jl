@@ -1,5 +1,5 @@
 using DynamicExpressions:
-    AbstractExpressionNode,
+    AbstractScalarExprNode,
     AbstractNode,
     Node,
     NodeSampler,
@@ -26,7 +26,7 @@ end
 
 function make_random_leaf(
     nfeatures::Int, ::Type{T}, ::Type{N}, rng::AbstractRNG=default_rng()
-) where {T,N<:AbstractExpressionNode}
+) where {T,N<:AbstractScalarExprNode}
     if rand(rng, Bool)
         return constructorof(N)(; val=randn(rng, T))
     else
@@ -36,7 +36,7 @@ end
 
 """Add a random unary/binary operation to the end of a tree"""
 function append_random_op(
-    tree::AbstractExpressionNode{T},
+    tree::AbstractScalarExprNode{T},
     operators,
     nfeatures::Int,
     rng::AbstractRNG=default_rng();

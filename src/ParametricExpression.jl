@@ -4,7 +4,7 @@ using DispatchDoctor: @stable, @unstable
 using ChainRulesCore: ChainRulesCore as CRC, NoTangent, @thunk
 
 using ..OperatorEnumModule: AbstractOperatorEnum, OperatorEnum
-using ..NodeModule: AbstractExpressionNode, Node, tree_mapreduce
+using ..NodeModule: AbstractScalarExprNode, Node, tree_mapreduce
 using ..ExpressionModule: AbstractExpression, Metadata
 using ..ChainRulesModule: NodeTangent
 
@@ -34,7 +34,7 @@ import ..ValueInterfaceModule:
     count_scalar_constants, pack_scalar_constants!, unpack_scalar_constants
 
 """A type of expression node that also stores a parameter index"""
-mutable struct ParametricNode{T} <: AbstractExpressionNode{T}
+mutable struct ParametricNode{T} <: AbstractScalarExprNode{T}
     degree::UInt8
     constant::Bool  # if true => constant; if false, then check `is_parameter`
     val::T
@@ -402,7 +402,7 @@ end
         n.is_parameter = true
         n.parameter = j::Int
         return n
-    elseif ex isa AbstractExpressionNode
+    elseif ex isa AbstractScalarExprNode
         return ex
     else
         return node_type(; val=ex)

@@ -1,6 +1,6 @@
 module SimplifyModule
 
-import ..NodeModule: AbstractExpressionNode, constructorof, Node, copy_node, set_node!
+import ..NodeModule: AbstractScalarExprNode, constructorof, Node, copy_node, set_node!
 import ..NodeUtilsModule: tree_mapreduce, is_node_constant
 import ..OperatorEnumModule: AbstractOperatorEnum
 import ..ValueInterfaceModule: is_valid
@@ -15,7 +15,7 @@ is_commutative(_) = false
 is_subtraction(::typeof(-)) = true
 is_subtraction(_) = false
 
-combine_operators(tree::AbstractExpressionNode, ::AbstractOperatorEnum) = tree
+combine_operators(tree::AbstractScalarExprNode, ::AbstractOperatorEnum) = tree
 # This is only defined for `Node` as it is not possible for, e.g.,
 # `GraphNode`.
 function combine_operators(tree::Node{T}, operators::AbstractOperatorEnum) where {T}
@@ -106,7 +106,7 @@ function combine_operators(tree::Node{T}, operators::AbstractOperatorEnum) where
     return tree
 end
 
-function combine_children!(operators, p::N, c::N...) where {T,N<:AbstractExpressionNode{T}}
+function combine_children!(operators, p::N, c::N...) where {T,N<:AbstractScalarExprNode{T}}
     all(is_node_constant, c) || return p
     vals = map(n -> n.val, c)
     all(is_valid, vals) || return p
@@ -122,7 +122,7 @@ function combine_children!(operators, p::N, c::N...) where {T,N<:AbstractExpress
 end
 
 # Simplify tree
-function simplify_tree!(tree::AbstractExpressionNode, operators::AbstractOperatorEnum)
+function simplify_tree!(tree::AbstractScalarExprNode, operators::AbstractOperatorEnum)
     return tree_mapreduce(
         identity, (p, c...) -> combine_children!(operators, p, c...), tree, typeof(tree);
     )

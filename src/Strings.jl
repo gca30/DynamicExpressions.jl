@@ -2,7 +2,7 @@ module StringsModule
 
 using ..UtilsModule: deprecate_varmap
 using ..OperatorEnumModule: AbstractOperatorEnum
-using ..NodeModule: AbstractExpressionNode, tree_mapreduce
+using ..NodeModule: AbstractScalarExprNode, tree_mapreduce
 
 const OP_NAMES = Base.ImmutableDict(
     "safe_log" => "log",
@@ -120,7 +120,7 @@ end
 
 """
     string_tree(
-        tree::AbstractExpressionNode{T},
+        tree::AbstractScalarExprNode{T},
         operators::Union{AbstractOperatorEnum,Nothing}=nothing;
         f_variable::F1=string_variable,
         f_constant::F2=string_constant,
@@ -141,7 +141,7 @@ Convert an equation to a string.
 - `variable_names::Union{Array{String, 1}, Nothing}=nothing`: (optional) what variables to print for each feature.
 """
 function string_tree(
-    tree::AbstractExpressionNode{T},
+    tree::AbstractScalarExprNode{T},
     operators::Union{AbstractOperatorEnum,Nothing}=nothing;
     f_variable::F1=string_variable,
     f_constant::F2=string_constant,
@@ -187,7 +187,7 @@ end
 for io in ((), (:(io::IO),))
     @eval function print_tree(
         $(io...),
-        tree::AbstractExpressionNode,
+        tree::AbstractScalarExprNode,
         operators::Union{AbstractOperatorEnum,Nothing}=nothing;
         f_variable::F1=string_variable,
         f_constant::F2=string_constant,

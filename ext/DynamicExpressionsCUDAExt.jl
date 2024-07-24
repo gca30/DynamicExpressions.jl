@@ -2,7 +2,7 @@ module DynamicExpressionsCUDAExt
 
 # TODO: Switch to KernelAbstractions.jl (once they hit v1.0)
 using CUDA: @cuda, CuArray, blockDim, blockIdx, threadIdx, CG
-using DynamicExpressions: OperatorEnum, AbstractExpressionNode
+using DynamicExpressions: OperatorEnum, AbstractScalarExprNode
 using DynamicExpressions.EvaluateEquationModule: get_nbin, get_nuna
 using DynamicExpressions.AsArrayModule: as_array
 
@@ -23,7 +23,7 @@ to_device(a, ::CuArray) = CuArray(a)
 to_device(a, ::FakeCuArray) = FakeCuArray(a)
 
 function eval_tree_array(
-    tree::AbstractExpressionNode{T}, gcX::MaybeCuArray{T,2}, operators::OperatorEnum; kws...
+    tree::AbstractScalarExprNode{T}, gcX::MaybeCuArray{T,2}, operators::OperatorEnum; kws...
 ) where {T<:Number}
     (outs, is_good) = eval_tree_array((tree,), gcX, operators; kws...)
     return (only(outs), only(is_good))
@@ -41,7 +41,7 @@ function eval_tree_array(
     num_launches=nothing,
     update_buffers::Val{_update_buffers}=Val(true),
     kws...,
-) where {T<:Number,N<:AbstractExpressionNode{T},_update_buffers}
+) where {T<:Number,N<:AbstractScalarExprNode{T},_update_buffers}
     if _update_buffers
         (; val, roots, buffer, num_nodes, num_launches) = as_array(Int32, trees; buffer)
     end

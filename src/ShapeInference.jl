@@ -982,6 +982,22 @@ function _shape_inference(
     return solved
 end
 
+
+# Ideally the choosing a random branch and choosing variables should be biased towards the initial values.
+#   This way, the shape inference could be considered a mutation.
+# In SR, when we create a new tree, we use the random aproach. When we mutate an old tree, we use the old size,
+#   plus possibly a mutation to increase or decrease the size in some axes.
+# The operator could also determine the size we want to pick (for example, if we have a convolution with an "image", 
+#   we choose a small kernel, etc.).
+# Mutatation on the values is not helpful (mutation all numbers in a tensor in a correlated way is probably not helpful,
+#   and mutating all numbers in a tensor in an uncorrelated way is useless, as the problem has too many variables for random
+#   change to be useful)
+# The mutation operations are therefore: the ones acting on expressions as nodes in the tree, shape inference variable change,
+#   and training (optimizing the constants)
+# There should also be a shape change that keeps the information in the previous value.
+# The loss function should also maybe contain a magnitude term of the weights (to reduce overfitting?) ?
+  
+
 """
     shape_inference(tree::TenosorNode{T,N}, operators::TensorOperatorEnum, featureSizes::NTuple{K,NTuple{N,Int64}}; ::Val{throw_errors}=Val(false))
         ::Bool where {throw_errors,N,K,T}

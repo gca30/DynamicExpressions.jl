@@ -1,10 +1,10 @@
-"""Test what happens if we create a custom AbstractExpressionNode that has extra fields."""
+"""Test what happens if we create a custom AbstractScalarExprNode that has extra fields."""
 
 using Test
 using DynamicExpressions
 using DynamicExpressions: constructorof
 
-mutable struct FrozenNode{T} <: AbstractExpressionNode{T}
+mutable struct FrozenNode{T} <: AbstractScalarExprNode{T}
     degree::UInt8
     constant::Bool
     val::T

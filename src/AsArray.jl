@@ -1,12 +1,12 @@
 module AsArrayModule
 
-using ..NodeModule: AbstractExpressionNode, tree_mapreduce, count_nodes
+using ..NodeModule: AbstractScalarExprNode, tree_mapreduce, count_nodes
 
 function as_array(
     ::Type{I},
     trees::Union{N,Tuple{N,Vararg{N}},AbstractVector{N}};
     buffer::Union{AbstractArray,Nothing}=nothing,
-) where {T,N<:AbstractExpressionNode{T},I}
+) where {T,N<:AbstractScalarExprNode{T},I}
     if trees isa N
         return as_array(I, (trees,); buffer=buffer)
     end

@@ -58,7 +58,7 @@ struct TensorOperator{Finplace,Fext,Fgrad,Fconstr,Fshapef,Fcompl}
         # inputs are NTuple{N, Int64}
 end
 
-broadcast_unaop(op::Fnum; op_complexity=1) where {Fnum} = TensorOperator(
+broadcast_unaop(op::Fnum ; op_complexity=1) where {Fnum} = TensorOperator(
     (l, res) -> (@. res = op(l)),
     # (l, res) -> (@. res = op(l)),
     (res, ∂res, l, ∂l) -> begin
@@ -69,10 +69,10 @@ broadcast_unaop(op::Fnum; op_complexity=1) where {Fnum} = TensorOperator(
     sl -> length(sl) * op_complexity
 )
 
-broadcast_binop(op::Fnum; op_complexity=1) where {Fnum} = TensorOperator(
+broadcast_binop(op::Fnum ; op_complexity=1) where {Fnum} = TensorOperator(
     (l, r, res) -> (@. res = op(l, r)),
     # (l, r, res) -> (@. res = op(l, r)),
-    function(res, ∂res, l, ∂l, r, ∂r, Val(comp)) where {comp}
+    function(res, ∂res, l, ∂l, r, ∂r, ::Val{comp}) where {comp}
         grads = gradient.(op, l, r)
         if comp & 0b10
             sum!(∂l, ∂res .* map(x->x[1], grads))

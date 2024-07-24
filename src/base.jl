@@ -149,10 +149,10 @@ function any(f::F, tree::AbstractNode) where {F<:Function}
     end
 end
 
-function Base.:(==)(a::AbstractExpressionNode, b::AbstractExpressionNode)
+function Base.:(==)(a::AbstractScalarExprNode, b::AbstractScalarExprNode)
     return Base.:(==)(promote(a, b)...)
 end
-function Base.:(==)(a::N, b::N)::Bool where {N<:AbstractExpressionNode}
+function Base.:(==)(a::N, b::N)::Bool where {N<:AbstractScalarExprNode}
     if preserve_sharing(N)
         return inner_is_equal_shared(a, b, Dict{UInt,Nothing}(), Dict{UInt,Nothing}())
     else
@@ -199,11 +199,11 @@ function inner_is_equal_shared(a, b, id_map_a, id_map_b)
     return result
 end
 
-@inline function branch_equal(a::AbstractExpressionNode, b::AbstractExpressionNode)
+@inline function branch_equal(a::AbstractScalarExprNode, b::AbstractScalarExprNode)
     return a.op == b.op
 end
 @inline function leaf_equal(
-    a::AbstractExpressionNode{T1}, b::AbstractExpressionNode{T2}
+    a::AbstractScalarExprNode{T1}, b::AbstractScalarExprNode{T2}
 ) where {T1,T2}
     (constant = a.constant) != b.constant && return false
     if constant
@@ -401,13 +401,13 @@ function length(tree::AbstractNode; break_sharing::Val=Val(false))
 end
 
 """
-    hash(tree::AbstractExpressionNode{T}[, h::UInt]; break_sharing::Val=Val(false)) where {T}
+    hash(tree::AbstractScalarExprNode{T}[, h::UInt]; break_sharing::Val=Val(false)) where {T}
 
 Compute a hash of a tree. This will compute a hash differently
 if nodes are shared in a tree. This is ignored if `break_sharing` is set to `Val(true)`.
 """
 function hash(
-    tree::AbstractExpressionNode{T}, h::UInt=zero(UInt); break_sharing::Val=Val(false)
+    tree::AbstractScalarExprNode{T}, h::UInt=zero(UInt); break_sharing::Val=Val(false)
 ) where {T}
     return tree_mapreduce(
         t -> leaf_hash(h, t),
@@ -420,15 +420,15 @@ function hash(
         break_sharing,
     )
 end
-function leaf_hash(h::UInt, t::AbstractExpressionNode)
+function leaf_hash(h::UInt, t::AbstractScalarExprNode)
     return t.constant ? hash((0, t.val), h) : hash((1, t.feature), h)
 end
-function branch_hash(h::UInt, t::AbstractExpressionNode, children::Vararg{Any,M}) where {M}
+function branch_hash(h::UInt, t::AbstractScalarExprNode, children::Vararg{Any,M}) where {M}
     return hash((t.degree + 1, t.op, children), h)
 end
 
 """
-    copy_node(tree::AbstractExpressionNode; break_sharing::Val=Val(false))
+    copy_node(tree::AbstractScalarExprNode; break_sharing::Val=Val(false))
 
 Copy a node, recursively copying all children nodes.
 This is more efficient than the built-in copy.
@@ -437,46 +437,46 @@ If `break_sharing` is set to `Val(true)`, sharing in a tree will be ignored.
 """
 function copy_node(
     tree::N; break_sharing::Val=Val(false)
-) where {T,N<:AbstractExpressionNode{T}}
+) where {T,N<:AbstractScalarExprNode{T}}
     return tree_mapreduce(leaf_copy, identity, branch_copy, tree, N; break_sharing)
 end
-function leaf_copy(t::N) where {T,N<:AbstractExpressionNode{T}}
+function leaf_copy(t::N) where {T,N<:AbstractScalarExprNode{T}}
     if t.constant
         return constructorof(N)(; val=t.val)
     else
         return constructorof(N)(T; feature=t.feature)
     end
 end
-function branch_copy(t::N, children::Vararg{Any,M}) where {T,N<:AbstractExpressionNode{T},M}
+function branch_copy(t::N, children::Vararg{Any,M}) where {T,N<:AbstractScalarExprNode{T},M}
     return constructorof(N)(T; op=t.op, children)
 end
 
 """
-    copy(tree::AbstractExpressionNode; break_sharing::Val=Val(false))
+    copy(tree::AbstractScalarExprNode; break_sharing::Val=Val(false))
 
 Copy a node, recursively copying all children nodes.
 This is more efficient than the built-in copy.
 
 If `break_sharing` is set to `Val(true)`, sharing in a tree will be ignored.
 """
-function copy(tree::AbstractExpressionNode; break_sharing::Val=Val(false))
+function copy(tree::AbstractScalarExprNode; break_sharing::Val=Val(false))
     return copy_node(tree; break_sharing)
 end
 
 """
-    convert(::Type{<:AbstractExpressionNode{T1}}, n::AbstractExpressionNode{T2}) where {T1,T2}
+    convert(::Type{<:AbstractScalarExprNode{T1}}, n::AbstractScalarExprNode{T2}) where {T1,T2}
 
-Convert a `AbstractExpressionNode{T2}` to a `AbstractExpressionNode{T1}`.
-This will recursively convert all children nodes to `AbstractExpressionNode{T1}`,
+Convert a `AbstractScalarExprNode{T2}` to a `AbstractScalarExprNode{T1}`.
+This will recursively convert all children nodes to `AbstractScalarExprNode{T1}`,
 using `convert(T1, tree.val)` at constant nodes.
 
 # Arguments
-- `::Type{AbstractExpressionNode{T1}}`: Type to convert to.
-- `tree::AbstractExpressionNode{T2}`: AbstractExpressionNode to convert.
+- `::Type{AbstractScalarExprNode{T1}}`: Type to convert to.
+- `tree::AbstractScalarExprNode{T2}`: AbstractScalarExprNode to convert.
 """
 function convert(
     ::Type{N1}, tree::N2
-) where {T1,T2,N1<:AbstractExpressionNode{T1},N2<:AbstractExpressionNode{T2}}
+) where {T1,T2,N1<:AbstractScalarExprNode{T1},N2<:AbstractScalarExprNode{T2}}
     if N1 === N2
         return tree
     end
@@ -495,10 +495,10 @@ function convert(
 end
 function convert(
     ::Type{N1}, tree::N2
-) where {T2,N1<:AbstractExpressionNode,N2<:AbstractExpressionNode{T2}}
+) where {T2,N1<:AbstractScalarExprNode,N2<:AbstractScalarExprNode{T2}}
     return convert(with_type_parameters(N1, T2), tree)
 end
-function (::Type{N})(tree::AbstractExpressionNode) where {N<:AbstractExpressionNode}
+function (::Type{N})(tree::AbstractScalarExprNode) where {N<:AbstractScalarExprNode}
     return convert(N, tree)
 end
 

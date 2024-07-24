@@ -2,7 +2,7 @@ module DynamicExpressionsSymbolicUtilsExt
 
 using SymbolicUtils
 import DynamicExpressions.NodeModule:
-    AbstractExpressionNode, Node, constructorof, DEFAULT_NODE_TYPE
+    AbstractScalarExprNode, Node, constructorof, DEFAULT_NODE_TYPE
 import DynamicExpressions.OperatorEnumModule: AbstractOperatorEnum
 import DynamicExpressions.ValueInterfaceModule: is_valid
 import DynamicExpressions.UtilsModule: deprecate_varmap
@@ -30,7 +30,7 @@ end
 subs_bad(x) = is_valid(x) ? x : Inf
 
 function parse_tree_to_eqs(
-    tree::AbstractExpressionNode{T},
+    tree::AbstractScalarExprNode{T},
     operators::AbstractOperatorEnum,
     index_functions::Bool=false,
 ) where {T}
@@ -85,7 +85,7 @@ function split_eq(
     variable_names::Union{Array{String,1},Nothing}=nothing,
     # Deprecated:
     varMap=nothing,
-) where {N<:AbstractExpressionNode}
+) where {N<:AbstractScalarExprNode}
     variable_names = deprecate_varmap(variable_names, varMap, :split_eq)
     !(op ∈ (sum, prod, +, *)) && throw(error("Unsupported operation $op in expression!"))
     if Symbol(op) == Symbol(sum)
@@ -111,7 +111,7 @@ end
 
 function Base.convert(
     ::typeof(SymbolicUtils.Symbolic),
-    tree::Union{AbstractExpression,AbstractExpressionNode},
+    tree::Union{AbstractExpression,AbstractScalarExprNode},
     operators::Union{AbstractOperatorEnum,Nothing}=nothing;
     variable_names::Union{Array{String,1},Nothing}=nothing,
     index_functions::Bool=false,
@@ -129,7 +129,7 @@ end
 
 function Base.convert(
     ::Type{N}, x::Number, operators::AbstractOperatorEnum; kws...
-) where {N<:AbstractExpressionNode}
+) where {N<:AbstractScalarExprNode}
     return constructorof(N)(; val=DEFAULT_NODE_TYPE(x))
 end
 
@@ -138,7 +138,7 @@ function Base.convert(
     expr::SymbolicUtils.Symbolic,
     operators::AbstractOperatorEnum;
     variable_names::Union{Array{String,1},Nothing}=nothing,
-) where {N<:AbstractExpressionNode}
+) where {N<:AbstractScalarExprNode}
     variable_names = deprecate_varmap(variable_names, nothing, :convert)
     if !SymbolicUtils.istree(expr)
         variable_names === nothing && return constructorof(N)(String(expr.name))
@@ -169,7 +169,7 @@ function Base.convert(
 end
 
 """
-    node_to_symbolic(tree::AbstractExpressionNode, operators::AbstractOperatorEnum;
+    node_to_symbolic(tree::AbstractScalarExprNode, operators::AbstractOperatorEnum;
                 variable_names::Union{Array{String, 1}, Nothing}=nothing,
                 index_functions::Bool=false)
 
@@ -178,17 +178,17 @@ will generate a symbolic equation in SymbolicUtils.jl format.
 
 ## Arguments
 
-- `tree::AbstractExpressionNode`: The equation to convert.
+- `tree::AbstractScalarExprNode`: The equation to convert.
 - `operators::AbstractOperatorEnum`: OperatorEnum, which contains the operators used in the equation.
 - `variable_names::Union{Array{String, 1}, Nothing}=nothing`: What variable names to use for
     each feature. Default is [x1, x2, x3, ...].
 - `index_functions::Bool=false`: Whether to generate special names for the
-    operators, which then allows one to convert back to a `AbstractExpressionNode` format
+    operators, which then allows one to convert back to a `AbstractScalarExprNode` format
     using `symbolic_to_node`.
     (CURRENTLY UNAVAILABLE - See https://github.com/MilesCranmer/SymbolicRegression.jl/pull/84).
 """
 function node_to_symbolic(
-    tree::AbstractExpressionNode,
+    tree::AbstractScalarExprNode,
     operators::AbstractOperatorEnum;
     variable_names::Union{Array{String,1},Nothing}=nothing,
     index_functions::Bool=false,
@@ -224,7 +224,7 @@ function symbolic_to_node(
     variable_names::Union{Array{String,1},Nothing}=nothing,
     # Deprecated:
     varMap=nothing,
-) where {N<:AbstractExpressionNode}
+) where {N<:AbstractScalarExprNode}
     variable_names = deprecate_varmap(variable_names, varMap, :symbolic_to_node)
     return convert(N, eqn, operators; variable_names=variable_names)
 end

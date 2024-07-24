@@ -60,7 +60,7 @@ When using these node constructors, types will automatically be promoted.
 You can convert the type of a node using `convert`:
 
 ```@docs
-convert(::Type{AbstractExpressionNode{T1}}, tree::AbstractExpressionNode{T2}) where {T1, T2}
+convert(::Type{AbstractScalarExprNode{T1}}, tree::AbstractScalarExprNode{T2}) where {T1, T2}
 ```
 
 You can set a `tree` (in-place) with `set_node!`:
@@ -134,7 +134,7 @@ which breaks shared connections into separate nodes.
 Both the `Node` and `GraphNode` types are subtypes of the abstract type:
 
 ```@docs
-AbstractExpressionNode{T}
+AbstractScalarExprNode{T}
 ```
 
 which can be used to create additional expression-like types.
@@ -168,7 +168,7 @@ ParametricNode
 
 ## Interfaces
 
-The interfaces for `AbstractExpression` and `AbstractExpressionNode` are
+The interfaces for `AbstractExpression` and `AbstractScalarExprNode` are
 tested using Interfaces.jl. You can see the interfaces with:
 
 ```@docs

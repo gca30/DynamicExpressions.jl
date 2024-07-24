@@ -7,7 +7,7 @@ using ..OperatorEnumModule: AbstractOperatorEnum, OperatorEnum
 using ..NodeModule:
     Node,
     GraphNode,
-    AbstractExpressionNode,
+    AbstractScalarExprNode,
     preserve_sharing,
     constructorof,
     default_allocator,
@@ -124,8 +124,8 @@ end
 function _check_default_node(ex::AbstractExpression{T}) where {T}
     ET = typeof(ex)
     E = Base.typename(ET).wrapper
-    return default_node_type(E) <: AbstractExpressionNode &&
-           default_node_type(ET) <: AbstractExpressionNode{T}
+    return default_node_type(E) <: AbstractScalarExprNode &&
+           default_node_type(ET) <: AbstractScalarExprNode{T}
 end
 function _check_constructorof(ex::AbstractExpression)
     return constructorof(typeof(ex)) isa Base.Callable
@@ -196,69 +196,69 @@ ei_description = (
 ###############################################################################
 
 ## mandatory
-function _check_create_node(tree::AbstractExpressionNode)
+function _check_create_node(tree::AbstractScalarExprNode)
     N = typeof(tree)
     NT = with_type_parameters(N, Float16)
     return NT() isa NT
 end
-function _check_copy(tree::AbstractExpressionNode)
+function _check_copy(tree::AbstractScalarExprNode)
     return copy(tree) isa typeof(tree)
 end
-function _check_hash(tree::AbstractExpressionNode)
+function _check_hash(tree::AbstractScalarExprNode)
     return hash(tree) isa UInt64
 end
-function _check_any(tree::AbstractExpressionNode)
+function _check_any(tree::AbstractScalarExprNode)
     return any(_ -> false, tree) isa Bool && any(_ -> true, tree)
 end
-function _check_equality(tree::AbstractExpressionNode)
+function _check_equality(tree::AbstractScalarExprNode)
     return (tree == copy(tree)) && (tree == tree)
 end
-function _check_preserve_sharing(tree::AbstractExpressionNode)
+function _check_preserve_sharing(tree::AbstractScalarExprNode)
     return preserve_sharing(tree) isa Bool
 end
-function _check_constructorof(tree::AbstractExpressionNode)
+function _check_constructorof(tree::AbstractScalarExprNode)
     return constructorof(typeof(tree)) isa Base.Callable
 end
-function _check_eltype(tree::AbstractExpressionNode{T}) where {T}
+function _check_eltype(tree::AbstractScalarExprNode{T}) where {T}
     return eltype(typeof(tree)) == eltype(tree) == T
 end
-function _check_with_type_parameters(tree::AbstractExpressionNode{T}) where {T}
+function _check_with_type_parameters(tree::AbstractScalarExprNode{T}) where {T}
     N = typeof(tree)
     NT = with_type_parameters(Base.typename(N).wrapper, eltype(tree))
     return NT == typeof(tree)
 end
-function _check_default_allocator(tree::AbstractExpressionNode)
+function _check_default_allocator(tree::AbstractScalarExprNode)
     N = Base.typename(typeof(tree)).wrapper
     return default_allocator(N, Float64) isa with_type_parameters(N, Float64)
 end
-function _check_set_node!(tree::AbstractExpressionNode)
+function _check_set_node!(tree::AbstractScalarExprNode)
     new_tree = copy(tree)
     set_node!(tree, new_tree)
     return tree == new_tree
 end
-function _check_count_nodes(tree::AbstractExpressionNode)
+function _check_count_nodes(tree::AbstractScalarExprNode)
     return count_nodes(tree) isa Int64
 end
-function _check_tree_mapreduce(tree::AbstractExpressionNode)
+function _check_tree_mapreduce(tree::AbstractScalarExprNode)
     return tree_mapreduce(_ -> 1, +, tree, Int64) ==
            tree_mapreduce(_ -> 1, _ -> 1, +, tree, Int64) ==
            count_nodes(tree)
 end
 
 ## optional
-function _check_leaf_copy(tree::AbstractExpressionNode)
+function _check_leaf_copy(tree::AbstractScalarExprNode)
     tree.degree != 0 && return true
     return leaf_copy(tree) isa typeof(tree)
 end
-function _check_leaf_hash(tree::AbstractExpressionNode)
+function _check_leaf_hash(tree::AbstractScalarExprNode)
     tree.degree != 0 && return true
     return leaf_hash(UInt(0), tree) isa UInt64
 end
-function _check_leaf_equal(tree::AbstractExpressionNode)
+function _check_leaf_equal(tree::AbstractScalarExprNode)
     tree.degree != 0 && return true
     return leaf_equal(tree, copy(tree))
 end
-function _check_branch_copy(tree::AbstractExpressionNode)
+function _check_branch_copy(tree::AbstractScalarExprNode)
     if tree.degree == 0
         return true
     elseif tree.degree == 1
@@ -267,43 +267,43 @@ function _check_branch_copy(tree::AbstractExpressionNode)
         return branch_copy(tree, tree.l, tree.r) isa typeof(tree)
     end
 end
-function _check_branch_hash(tree::AbstractExpressionNode)
+function _check_branch_hash(tree::AbstractScalarExprNode)
     tree.degree == 0 && return true
     return branch_hash(UInt64(0), tree) isa UInt64
 end
-function _check_branch_equal(tree::AbstractExpressionNode)
+function _check_branch_equal(tree::AbstractScalarExprNode)
     tree.degree == 0 && return true
     return branch_equal(tree, copy(tree))
 end
-function _check_count_depth(tree::AbstractExpressionNode)
+function _check_count_depth(tree::AbstractScalarExprNode)
     return count_depth(tree) isa Int64
 end
-function _check_is_node_constant(tree::AbstractExpressionNode)
+function _check_is_node_constant(tree::AbstractScalarExprNode)
     return is_node_constant(tree) isa Bool
 end
-function _check_count_constant_nodes(tree::AbstractExpressionNode)
+function _check_count_constant_nodes(tree::AbstractScalarExprNode)
     return count_constant_nodes(tree) isa Int64
 end
-function _check_filter_map(tree::AbstractExpressionNode)
+function _check_filter_map(tree::AbstractScalarExprNode)
     return filter_map(_ -> true, identity, tree, typeof(tree)) isa Vector{typeof(tree)}
 end
-function _check_has_constants(tree::AbstractExpressionNode)
+function _check_has_constants(tree::AbstractScalarExprNode)
     return has_constants(tree) isa Bool
 end
-function _check_get_constants(tree::AbstractExpressionNode{T}) where {T}
+function _check_get_constants(tree::AbstractScalarExprNode{T}) where {T}
     output = get_scalar_constants(tree)
     return first(output) isa AbstractVector{T} && length(output) == 2
 end
-function _check_set_constants!(tree::AbstractExpressionNode)
+function _check_set_constants!(tree::AbstractScalarExprNode)
     constants, refs = get_scalar_constants(tree)
     new_constants = map(x -> x * 2, constants)
     set_scalar_constants!(tree, new_constants, refs)
     return get_scalar_constants(tree)[1] == new_constants
 end
-function _check_index_constant_nodes(tree::AbstractExpressionNode)
+function _check_index_constant_nodes(tree::AbstractScalarExprNode)
     return index_constant_nodes(tree) isa NodeIndex{UInt16}
 end
-function _check_has_operators(tree::AbstractExpressionNode)
+function _check_has_operators(tree::AbstractScalarExprNode)
     return has_operators(tree) isa Bool
 end
 
@@ -348,7 +348,7 @@ ni_components = (
 )
 
 ni_description = (
-    "Defines the interface for [`AbstractExpressionNode`](@ref) "
+    "Defines the interface for [`AbstractScalarExprNode`](@ref) "
     * "which can include various operations such as copying, hashing, and checking equality, "
     * "as well as tree-specific operations like map-reduce and node manipulation."
 )
@@ -357,7 +357,7 @@ ni_description = (
 
 @interface(
     NodeInterface,
-    AbstractExpressionNode,
+    AbstractScalarExprNode,
     ni_components,
     ni_description
 )

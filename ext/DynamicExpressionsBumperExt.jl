@@ -2,14 +2,14 @@ module DynamicExpressionsBumperExt
 
 using Bumper: @no_escape, @alloc
 using DynamicExpressions:
-    OperatorEnum, AbstractExpressionNode, tree_mapreduce, is_valid_array
+    OperatorEnum, AbstractScalarExprNode, tree_mapreduce, is_valid_array
 using DynamicExpressions.UtilsModule: ResultOk, counttuple
 
 import DynamicExpressions.ExtensionInterfaceModule:
     bumper_eval_tree_array, bumper_kern1!, bumper_kern2!
 
 function bumper_eval_tree_array(
-    tree::AbstractExpressionNode{T},
+    tree::AbstractScalarExprNode{T},
     cX::AbstractMatrix{T},
     operators::OperatorEnum,
     ::Val{turbo},

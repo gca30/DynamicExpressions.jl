@@ -6,12 +6,14 @@ using DispatchDoctor: @stable, @unstable
     include("Utils.jl")
     include("ValueInterface.jl")
     include("ExtensionInterface.jl")
+    include("FlattenedTensorList.jl")
     include("OperatorEnum.jl")
     include("Node.jl")
     include("NodeUtils.jl")
     include("Strings.jl")
     include("Evaluate.jl")
     include("EvaluateDerivative.jl")
+    include("EvaluateTensors.jl")
     include("ChainRules.jl")
     include("EvaluationHelpers.jl")
     include("Simplify.jl")
@@ -36,7 +38,7 @@ import .ValueInterfaceModule:
     ValueInterface
 @reexport import .NodeModule:
     AbstractNode,
-    AbstractExpressionNode,
+    AbstractScalarExprNode,
     GraphNode,
     Node,
     copy_node,

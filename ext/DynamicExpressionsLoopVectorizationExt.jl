@@ -1,7 +1,7 @@
 module DynamicExpressionsLoopVectorizationExt
 
 using LoopVectorization: @turbo
-using DynamicExpressions: AbstractExpressionNode
+using DynamicExpressions: AbstractScalarExprNode
 using DynamicExpressions.UtilsModule: ResultOk, fill_similar
 using DynamicExpressions.EvaluateModule: @return_on_check
 import DynamicExpressions.EvaluateModule:
@@ -38,7 +38,7 @@ function deg1_eval(
 end
 
 function deg1_l2_ll0_lr0_eval(
-    tree::AbstractExpressionNode{T}, cX::AbstractMatrix{T}, op::F, op_l::F2, ::Val{true}
+    tree::AbstractScalarExprNode{T}, cX::AbstractMatrix{T}, op::F, op_l::F2, ::Val{true}
 ) where {T<:Number,F,F2}
     if tree.l.l.constant && tree.l.r.constant
         val_ll = tree.l.l.val
@@ -86,7 +86,7 @@ function deg1_l2_ll0_lr0_eval(
 end
 
 function deg1_l1_ll0_eval(
-    tree::AbstractExpressionNode{T}, cX::AbstractMatrix{T}, op::F, op_l::F2, ::Val{true}
+    tree::AbstractScalarExprNode{T}, cX::AbstractMatrix{T}, op::F, op_l::F2, ::Val{true}
 ) where {T<:Number,F,F2}
     if tree.l.l.constant
         val_ll = tree.l.l.val
@@ -109,7 +109,7 @@ function deg1_l1_ll0_eval(
 end
 
 function deg2_l0_r0_eval(
-    tree::AbstractExpressionNode{T}, cX::AbstractMatrix{T}, op::F, ::Val{true}
+    tree::AbstractScalarExprNode{T}, cX::AbstractMatrix{T}, op::F, ::Val{true}
 ) where {T<:Number,F}
     if tree.l.constant && tree.r.constant
         val_l = tree.l.val
@@ -153,7 +153,7 @@ end
 
 # op(x, y) for x variable/constant, y arbitrary
 function deg2_l0_eval(
-    tree::AbstractExpressionNode{T},
+    tree::AbstractScalarExprNode{T},
     cumulator::AbstractVector{T},
     cX::AbstractArray{T},
     op::F,
@@ -178,7 +178,7 @@ function deg2_l0_eval(
 end
 
 function deg2_r0_eval(
-    tree::AbstractExpressionNode{T},
+    tree::AbstractScalarExprNode{T},
     cumulator::AbstractVector{T},
     cX::AbstractArray{T},
     op::F,

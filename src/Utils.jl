@@ -13,7 +13,7 @@ macro return_on_false2(flag, retval, retval2)
 end
 
 """
-    @memoize_on tree [postprocess] function my_function_on_tree(tree::AbstractExpressionNode)
+    @memoize_on tree [postprocess] function my_function_on_tree(tree::AbstractScalarExprNode)
         ...
     end
 

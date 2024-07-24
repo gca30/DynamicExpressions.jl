@@ -2,7 +2,7 @@ module ParseModule
 
 using DispatchDoctor: @unstable
 
-using ..NodeModule: AbstractExpressionNode, Node, constructorof
+using ..NodeModule: AbstractScalarExprNode, Node, constructorof
 using ..OperatorEnumModule: AbstractOperatorEnum
 using ..OperatorEnumConstructionModule: OperatorEnum, empty_all_globals!
 using ..ExpressionModule:
@@ -211,7 +211,7 @@ end
     node_type::Type{N}=default_node_type(expression_type),
     evaluate_on::Union{Nothing,AbstractVector}=nothing,
     kws...,
-) where {N<:AbstractExpressionNode,E<:AbstractExpression}
+) where {N<:AbstractScalarExprNode,E<:AbstractExpression}
     empty_all_globals!(; force=false)
     let variable_names = if variable_names === nothing
             nothing
@@ -253,7 +253,7 @@ module EmptyModule end
     ::Type{E},
     evaluate_on::Union{Nothing,AbstractVector};
     kws...,
-) where {N<:AbstractExpressionNode,E<:AbstractExpression}
+) where {N<:AbstractScalarExprNode,E<:AbstractExpression}
     ex.head != :call && throw(
         ArgumentError(
             "Unrecognized expression type: `Expr(:$(ex.head), ...)`. " *
@@ -281,7 +281,7 @@ end
     ::Type{E},
     evaluate_on::Union{Nothing,AbstractVector};
     kws...,
-)::N where {F<:Function,N<:AbstractExpressionNode,E<:AbstractExpression}
+)::N where {F<:Function,N<:AbstractScalarExprNode,E<:AbstractExpression}
     if length(args) == 2 && func ∈ operators.unaops
         # Regular unary operator
         op = findfirst(==(func), operators.unaops)::Int
@@ -365,7 +365,7 @@ end
     ex,
     operators::AbstractOperatorEnum,
     variable_names::Union{AbstractVector{<:AbstractString},Nothing},
-    node_type::Type{<:AbstractExpressionNode},
+    node_type::Type{<:AbstractScalarExprNode},
     expression_type::Type{<:AbstractExpression},
     evaluate_on::Union{Nothing,AbstractVector};
     kws...,
@@ -376,7 +376,7 @@ end
 @unstable function parse_leaf(
     ex,
     variable_names,
-    node_type::Type{<:AbstractExpressionNode},
+    node_type::Type{<:AbstractScalarExprNode},
     expression_type::Type{<:AbstractExpression};
     kws...,
 )
@@ -401,7 +401,7 @@ end
             )
         end
         return node_type(; feature=i::Int)
-    elseif ex isa AbstractExpressionNode
+    elseif ex isa AbstractScalarExprNode
         return ex
     else
         return node_type(; val=ex)

@@ -13,14 +13,14 @@ Assuming you are only using a single `OperatorEnum`, you can also use
 the following shorthand by using the expression as a function:
 
 ```
-    (tree::AbstractExpressionNode)(X::AbstractMatrix{T}, operators::OperatorEnum; turbo::Union{Bool,Val}=false, bumper::Union{Bool,Val}=Val(false))
+    (tree::AbstractScalarExprNode)(X::AbstractMatrix{T}, operators::OperatorEnum; turbo::Union{Bool,Val}=false, bumper::Union{Bool,Val}=Val(false))
 
 Evaluate a binary tree (equation) over a given input data matrix. The
 operators contain all of the operators used. This function fuses doublets
 and triplets of operations for lower memory usage.
 
 # Arguments
-- `tree::AbstractExpressionNode`: The root node of the tree to evaluate.
+- `tree::AbstractScalarExprNode`: The root node of the tree to evaluate.
 - `cX::AbstractMatrix{T}`: The input data to evaluate the tree on.
 - `operators::OperatorEnum`: The operators used in the tree.
 - `turbo::Union{Bool,Val}`: Use LoopVectorization.jl for faster evaluation.

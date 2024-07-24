@@ -6,7 +6,7 @@ Various functions in `Base` are overloaded to treat an `AbstractNode` as a
 collection of its nodes.
 
 ```@docs
-copy(tree::AbstractExpressionNode; break_sharing::Val=Val(false))
+copy(tree::AbstractScalarExprNode; break_sharing::Val=Val(false))
 collect(tree::AbstractNode; break_sharing::Val=Val(false))
 filter(f::Function, tree::AbstractNode; break_sharing::Val=Val(false))
 count(f::Function, tree::AbstractNode; init=0, break_sharing::Val=Val(false))
@@ -16,8 +16,8 @@ mapreduce(f::F, op::G, tree::AbstractNode; return_type, f_on_shared, break_shari
 any(f::F, tree::AbstractNode) where {F<:Function}
 all(f::F, tree::AbstractNode) where {F<:Function}
 map(f::F, tree::AbstractNode, result_type::Type{RT}=Nothing; break_sharing::Val=Val(false)) where {F<:Function,RT}
-convert(::Type{<:AbstractExpressionNode{T1}}, n::AbstractExpressionNode{T2}) where {T1,T2}
-hash(tree::AbstractExpressionNode{T}, h::UInt; break_sharing::Val=Val(false)) where {T}
+convert(::Type{<:AbstractScalarExprNode{T1}}, n::AbstractScalarExprNode{T2}) where {T1,T2}
+hash(tree::AbstractScalarExprNode{T}, h::UInt; break_sharing::Val=Val(false)) where {T}
 ```
 
 ## Printing

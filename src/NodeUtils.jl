@@ -4,6 +4,8 @@ import Compat: Returns
 import ..NodeModule:
     AbstractNode,
     AbstractExprNode,
+    AbstractScalarExprNode,
+    AbstractTensorExprNode,
     Node,
     preserve_sharing,
     constructorof,
@@ -12,6 +14,8 @@ import ..NodeModule:
     tree_mapreduce,
     any,
     filter_map
+import ..FlattenedTensorListModule:
+    FlattenedTensorList
 import ..ValueInterfaceModule:
     pack_scalar_constants!, unpack_scalar_constants, count_scalar_constants, get_number_type
 

@@ -1,6 +1,6 @@
 module EvaluateDerivativeModule
 
-import ..NodeModule: AbstractExpressionNode, constructorof
+import ..NodeModule: AbstractScalarExprNode, constructorof
 import ..OperatorEnumModule: OperatorEnum
 import ..UtilsModule: fill_similar, ResultOk2
 import ..ValueInterfaceModule: is_valid_array
@@ -9,7 +9,7 @@ import ..EvaluateModule: deg0_eval, get_nuna, get_nbin, OPERATOR_LIMIT_BEFORE_SL
 import ..ExtensionInterfaceModule: _zygote_gradient
 
 """
-    eval_diff_tree_array(tree::AbstractExpressionNode{T}, cX::AbstractMatrix{T}, operators::OperatorEnum, direction::Integer; turbo::Union{Bool,Val}=Val(false))
+    eval_diff_tree_array(tree::AbstractScalarExprNode{T}, cX::AbstractMatrix{T}, operators::OperatorEnum, direction::Integer; turbo::Union{Bool,Val}=Val(false))
 
 Compute the forward derivative of an expression, using a similar
 structure and optimization to eval_tree_array. `direction` is the index of a particular
@@ -18,7 +18,7 @@ respect to `x1`.
 
 # Arguments
 
-- `tree::AbstractExpressionNode`: The expression tree to evaluate.
+- `tree::AbstractScalarExprNode`: The expression tree to evaluate.
 - `cX::AbstractMatrix{T}`: The data matrix, with each column being a data point.
 - `operators::OperatorEnum`: The operators used to create the `tree`.
 - `direction::Integer`: The index of the variable to take the derivative with respect to.
@@ -31,7 +31,7 @@ respect to `x1`.
     the derivative, and whether the evaluation completed as normal (or encountered a nan or inf).
 """
 function eval_diff_tree_array(
-    tree::AbstractExpressionNode{T},
+    tree::AbstractScalarExprNode{T},
     cX::AbstractMatrix{T},
     operators::OperatorEnum,
     direction::Integer;
@@ -45,7 +45,7 @@ function eval_diff_tree_array(
     return (result.x, result.dx, result.ok)
 end
 function eval_diff_tree_array(
-    tree::AbstractExpressionNode{T1},
+    tree::AbstractScalarExprNode{T1},
     cX::AbstractMatrix{T2},
     operators::OperatorEnum,
     direction::Integer;
@@ -59,7 +59,7 @@ function eval_diff_tree_array(
 end
 
 @generated function _eval_diff_tree_array(
-    tree::AbstractExpressionNode{T},
+    tree::AbstractScalarExprNode{T},
     cX::AbstractMatrix{T},
     operators::OperatorEnum,
     direction::Integer,
@@ -112,7 +112,7 @@ end
 end
 
 function diff_deg0_eval(
-    tree::AbstractExpressionNode{T}, cX::AbstractMatrix{T}, direction::Integer
+    tree::AbstractScalarExprNode{T}, cX::AbstractMatrix{T}, direction::Integer
 ) where {T<:Number}
     const_part = deg0_eval(tree, cX).x
     derivative_part = if ((!tree.constant) && tree.feature == direction)
@@ -124,7 +124,7 @@ function diff_deg0_eval(
 end
 
 function diff_deg1_eval(
-    tree::AbstractExpressionNode{T},
+    tree::AbstractScalarExprNode{T},
     cX::AbstractMatrix{T},
     op::F,
     operators::OperatorEnum,
@@ -148,7 +148,7 @@ function diff_deg1_eval(
 end
 
 function diff_deg2_eval(
-    tree::AbstractExpressionNode{T},
+    tree::AbstractScalarExprNode{T},
     cX::AbstractMatrix{T},
     op::F,
     operators::OperatorEnum,
@@ -178,7 +178,7 @@ function diff_deg2_eval(
 end
 
 """
-    eval_grad_tree_array(tree::AbstractExpressionNode{T}, cX::AbstractMatrix{T}, operators::OperatorEnum; variable::Union{Bool,Val}=Val(false), turbo::Union{Bool,Val}=Val(false))
+    eval_grad_tree_array(tree::AbstractScalarExprNode{T}, cX::AbstractMatrix{T}, operators::OperatorEnum; variable::Union{Bool,Val}=Val(false), turbo::Union{Bool,Val}=Val(false))
 
 Compute the forward-mode derivative of an expression, using a similar
 structure and optimization to eval_tree_array. `variable` specifies whether
@@ -187,7 +187,7 @@ to every constant in the expression.
 
 # Arguments
 
-- `tree::AbstractExpressionNode{T}`: The expression tree to evaluate.
+- `tree::AbstractScalarExprNode{T}`: The expression tree to evaluate.
 - `cX::AbstractMatrix{T}`: The data matrix, with each column being a data point.
 - `operators::OperatorEnum`: The operators used to create the `tree`.
 - `variable::Union{Bool,Val}`: Whether to take derivatives with respect to features (i.e., `cX` - with `variable=true`),
@@ -201,7 +201,7 @@ to every constant in the expression.
     the gradient, and whether the evaluation completed as normal (or encountered a nan or inf).
 """
 function eval_grad_tree_array(
-    tree::AbstractExpressionNode{T},
+    tree::AbstractScalarExprNode{T},
     cX::AbstractMatrix{T},
     operators::OperatorEnum;
     variable::Union{Bool,Val}=Val(false),
@@ -238,7 +238,7 @@ function eval_grad_tree_array(
 end
 
 function eval_grad_tree_array(
-    tree::AbstractExpressionNode{T},
+    tree::AbstractScalarExprNode{T},
     n_gradients,
     index_tree::Union{NodeIndex,Nothing},
     cX::AbstractMatrix{T},
@@ -253,7 +253,7 @@ function eval_grad_tree_array(
 end
 
 function eval_grad_tree_array(
-    tree::AbstractExpressionNode{T1},
+    tree::AbstractScalarExprNode{T1},
     cX::AbstractMatrix{T2},
     operators::OperatorEnum;
     variable::Union{Bool,Val}=Val(false),
@@ -270,7 +270,7 @@ function eval_grad_tree_array(
 end
 
 @generated function _eval_grad_tree_array(
-    tree::AbstractExpressionNode{T},
+    tree::AbstractScalarExprNode{T},
     n_gradients,
     index_tree::Union{NodeIndex,Nothing},
     cX::AbstractMatrix{T},
@@ -323,7 +323,7 @@ end
 end
 
 function grad_deg0_eval(
-    tree::AbstractExpressionNode{T},
+    tree::AbstractScalarExprNode{T},
     n_gradients,
     index_tree::Union{NodeIndex,Nothing},
     cX::AbstractMatrix{T},
@@ -361,7 +361,7 @@ function grad_deg0_eval(
 end
 
 function grad_deg1_eval(
-    tree::AbstractExpressionNode{T},
+    tree::AbstractScalarExprNode{T},
     n_gradients,
     index_tree::Union{NodeIndex,Nothing},
     cX::AbstractMatrix{T},
@@ -395,7 +395,7 @@ function grad_deg1_eval(
 end
 
 function grad_deg2_eval(
-    tree::AbstractExpressionNode{T},
+    tree::AbstractScalarExprNode{T},
     n_gradients,
     index_tree::Union{NodeIndex,Nothing},
     cX::AbstractMatrix{T},
