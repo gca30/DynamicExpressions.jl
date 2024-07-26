@@ -2,10 +2,11 @@
 using DynamicExpressions.NodeModule: TensorNode
 using DynamicExpressions.OperatorEnumModule
 using DynamicExpressions.OperatorEnumModule: TensorOperator, TensorOperatorEnum
-using DynamicExpressions.FlattenedTensorListModule: FlattenedTensorList
+using DynamicExpressions.FlattenedTensorListModule: FlattenedTensorList, treat_as_flattened
 using DynamicExpressions.OperatorEnumConstructionModule
 using DynamicExpressions.OperatorEnumConstructionModule: broadcast_binop, broadcast_unaop, @extend_operators
-using DynamicExpressions.ShapeInferenceModule: @make_constraint
+using DynamicExpressions.ShapeInferenceModule
+using DynamicExpressions.ShapeInferenceModule: @make_constraint, CombinedConstraints, Constraint, shape_inference
 
 c1 = TensorNode{Float64, 3}(; feature=1, constant=true)
 c2 = TensorNode{Float64, 3}(; feature=2, constant=true)
@@ -68,7 +69,7 @@ op_T = TensorOperator(;
     push_constraints! = function(cs, (resoff, loff), ::Val{N}) where {N}
         push!(cs, @make_constraint((resoff+1, resoff+2, loff+1, loff+2), (n, m, m, n)))
         for nx in 3:N
-            push!(cs, @make_constraint((resoff+nx, loff+nx, roff+nx), (n, n, n)))
+            push!(cs, @make_constraint((resoff+nx, loff+nx), (n, n)))
         end
     end,
     complexity = (sl) -> prod(sl)
@@ -88,3 +89,69 @@ trees = [
 ]
 
 for tree in trees println(tree) end
+
+
+# ----------------------
+# SHAPE INFERENCE EXAMPLE
+# ----------------------
+
+cb = CombinedConstraints(44, 5)
+cs = Constraint[]
+# a1 = a2 is equivalent to:
+push!(cs, Constraint(
+    Int32[1, 2],
+    begin
+        out = Array{Int32, 3}(undef, 1, 2, 2)
+        out[1, 1, :] .= (0, 1)
+        out[1, 2, :] .= (0, 1)
+        out
+    end
+))
+# a3 = 5 is equivalent to:
+push!(cs, Constraint(
+    Int32[3],
+    Int32[5;;;]
+))
+# (a4,a5,a6) = {(n,1,n)} u {(n,n,n)} u {(n,n,1)} is:
+push!(cs, Constraint(
+    Int32[4, 5, 6],
+    begin
+        out = Array{Int32, 3}(undef, 3, 3, 2)
+        out[1, 1, :] .= (0, 1)
+        out[1, 2, :] .= (1, 0)
+        out[1, 3, :] .= (0, 1)
+        out[2, 1, :] .= (0, 1)
+        out[2, 2, :] .= (0, 1)
+        out[2, 3, :] .= (0, 1)
+        out[3, 1, :] .= (0, 1)
+        out[3, 2, :] .= (0, 1)
+        out[3, 3, :] .= (1, 0)
+        out
+    end
+))
+# a9 = a7+a8 is:
+push!(cs, Constraint(
+    Int32[7, 8, 9],
+    begin
+        out = Array{Int32, 3}(undef, 1, 3, 3)
+        out[1, 1, :] .= (0, 1, 0)
+        out[1, 2, :] .= (0, 0, 1)
+        out[1, 3, :] .= (0, 1, 1)
+        out
+    end
+))
+
+cb.values[3, 3] = 3
+cb.values[4, 5] = 6
+cb.values[3, 5] = 3
+cb.values[1, 5] = 2
+cb.values[1, 1] = 9
+cb.values[1, 2] = 9
+cb.values[1, 3] = 1
+print(cb)
+print(cs)
+
+
+buffer = Vector{Float64}(undef, 32)
+cX = treat_as_flattened(buffer, [(3, 3, 1), (1, 3, 1), (3, 1, 1), (1, 1, 1)], 2)
+shape_inference(trees[1], operators, cX)

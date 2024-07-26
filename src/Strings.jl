@@ -1,8 +1,8 @@
 module StringsModule
 
 using ..UtilsModule: deprecate_varmap
-using ..OperatorEnumModule: AbstractOperatorEnum
-using ..NodeModule: AbstractScalarExprNode, tree_mapreduce
+using ..OperatorEnumModule: AbstractOperatorEnum, TensorOperatorEnum
+using ..NodeModule: AbstractScalarExprNode, tree_mapreduce, AbstractTensorExprNode
 
 const OP_NAMES = Base.ImmutableDict(
     "safe_log" => "log",
@@ -21,7 +21,21 @@ function dispatch_op_name(::Val{deg}, ::Nothing, idx)::Vector{Char} where {deg}
         return vcat(collect("binary_operator["), collect(string(idx)), [']'])
     end
 end
+function dispatch_op_name_short(::Val{deg}, ::Nothing, idx)::Vector{Char} where {deg}
+    if deg == 1
+        return collect("u$(idx)")
+    else
+        return collect("b$(idx)")
+    end
+end
 function dispatch_op_name(::Val{deg}, operators::AbstractOperatorEnum, idx) where {deg}
+    if deg == 1
+        return get_op_name(operators.unaops[idx])::Vector{Char}
+    else
+        return get_op_name(operators.binops[idx])::Vector{Char}
+    end
+end
+function dispatch_op_name_short(::Val{deg}, operators::TensorOperatorEnum, idx) where {deg}
     if deg == 1
         return get_op_name(operators.unaops[idx])::Vector{Char}
     else
@@ -32,7 +46,10 @@ end
 @generated function get_op_name(op::F)::Vector{Char} where {F}
     try
         # Bit faster to just cache the name of the operator:
-        op_s = if F <: Broadcast.BroadcastFunction
+        
+        op_s = if F <: TensorOperator
+            string(op.symbol_name)
+        elseif F <: Broadcast.BroadcastFunction
             string(F.parameters[1].instance) * '.'
         else
             string(F.instance)
@@ -74,6 +91,10 @@ function string_constant(val)
     else
         string(val)
     end
+end
+
+function string_constant_tensor(feature)
+    return "c$(feature)"
 end
 
 function string_variable(feature, variable_names)
@@ -182,6 +203,47 @@ function string_tree(
     )
     return String(strip_brackets(raw_output))
 end
+
+function string_tree(
+    tree::AbstractTensorExprNode{T},
+    operators::Union{TensorOperatorEnum,Nothing}=nothing;
+    f_variable::F1=string_variable,
+    f_constant::F2=string_constant_tensor,
+    variable_names::Union{AbstractVector{<:AbstractString},Nothing}=nothing
+)::String where {T,F1<:Function,F2<:Function}
+    raw_output = tree_mapreduce(
+        let f_constant = f_constant,
+            f_variable = f_variable,
+            variable_names = variable_names
+
+            (leaf,) -> if leaf.constant
+                collect(f_constant(leaf.feature))::Vector{Char}
+            else
+                collect(f_variable(leaf.feature, variable_names))::Vector{Char}
+            end
+        end,
+        let operators = operators
+            (branch,) -> if branch.degree == 1
+                dispatch_op_name_short(Val(1), operators, branch.op)::Vector{Char}
+            else
+                dispatch_op_name_short(Val(2), operators, branch.op)::Vector{Char}
+            end
+        end,
+        combine_op_with_inputs,
+        tree,
+        Vector{Char};
+        f_on_shared=(c, is_shared) -> if is_shared
+            out = ['{']
+            append!(out, c)
+            push!(out, '}')
+            out
+        else
+            c
+        end,
+    )
+    return String(strip_brackets(raw_output))
+end
+
 
 # Print an equation
 for io in ((), (:(io::IO),))

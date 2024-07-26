@@ -4,6 +4,7 @@ module ShapeInferenceModule
 using ...NodeModule: TensorNode
 using ..OperatorEnumModule: TensorOperatorEnum
 using ..FlattenedTensorListModule: FlattenedTensorList
+using ...NodeUtilsModule: renumber_nodes!, number_of_indices
 
 # ----------------------
 # DEFINITIONS
@@ -42,7 +43,7 @@ end
 
 @inline expand_mvars(mat::Matrix) = cat(mat, zeros(eltype(mat), size(mat)...); dims=2)
 @inline expand_mvars!(cb::CombinedConstraints) = begin
-    cb.values = expand(cb.values)
+    cb.values = expand_mvars(cb.values)
 end
 
 @inline mvar_occupied(cb::CombinedConstraints, mx) = any(!=(0), @view(cb.values[:,mx]))
@@ -57,7 +58,7 @@ first_unused_var!(cb::CombinedConstraints) = begin
         if mx == 1 continue end
         if !mvar_occupied(cb, mx) return mx end
     end
-    mx = length(cb.occupied) + 1
+    mx = size(cb.values, 2) + 1
     expand_mvars!(cb)
     return mx
 end
@@ -66,7 +67,7 @@ first_unused_var!(cb::CombinedConstraints, constsMap::CombinedConstraints) = beg
         if mx == 1 continue end
         if !mvar_occupied(cb, mx) && !mvar_occupied(constsMap, mx) return mx end
     end
-    mx = length(cb.occupied) + 1
+    mx = size(cb.values, 2) + 1
     expand_mvars!(cb)
     expand_mvars!(constsMap)
     return mx
@@ -74,11 +75,16 @@ end
 
 function replace_var!(cb::CombinedConstraints, mx, val::AbstractVector{Int32})
     @assert size(cb.values, 2) == length(val)
-    for ax in size(cb.values, 1)
-        if mat[ax, mx] == 0 continue end
-        coef = mat[ax, mx]
-        mat[ax, mx] = 0
-        @. @view(mat[ax,:]) += val * coef
+    for ax in axes(cb.values, 1)
+        if cb.values[ax, mx] == 0 
+            continue
+        end
+        # print("finally found m$(mx) in: a$(ax) = ")
+        # print_mvars(stdout, cb.values[ax,:])
+        # print("\n")
+        coef = cb.values[ax, mx]
+        cb.values[ax, mx] = 0
+        @. @view(cb.values[ax,:]) += val * coef
     end
 end
 
@@ -100,9 +106,9 @@ end
 function renormalize_mvars!(cb::CombinedConstraints)
     nmx = 1
     omx = 1
-    while omx < size(cbv, 2)
+    while omx < size(cb.values, 2)
         omx+=1
-        if mvar_occupied(cbv, omx)
+        if mvar_occupied(cb.values, omx)
             nmx += 1
             if nmx == omx continue end
             @. @view(cb.values[:,nmx]) = @view(cb.values[:, omx])
@@ -128,148 +134,15 @@ end
 # ALGORITHM IMPLEMENTATION
 # ----------------------
 
-#=
-#= ::Tuple{Int32,Int32} -> if an error occurs, it returns the upsetting "error code", a_x =#
-function outsubst(c::Constraint{M,C,V}, cb::CombinedConstraints) where {M,C,V}
-    currentVars = varvecsize(cb)
-    # create the map for consts
-    constsMap = zeros(Int32, currentVars, V)
-    constsMap[1,1] = 1
-    for i in 1:M
-        ax = c.tuple[i]
-        value = c.sets[1][i,:]
-        
-        if ax_occupied(cb, ax)
-            
-            # adding the constants to the combined constraints
-            for j in 2:V
-                if value[j] == 0 continue end
-                if any(!=(0), constsMap[:,j])
-                    newvar = first_unused_var!(cb, constsMap)
-                    if newvar > currentVars
-                        currentVars = varvecsize(cb)
-                        constsMap = expand(constsMap)
-                    end
-                    constsMap[newvar, j] = 1
-                end
-            end
-
-            result = zeros(Int32, currentVars)
-            result[1] = value[1]
-            for j in 2:V
-                if value[j] == 0 continue end
-                @. result += @view(constsMap[:,j]) * value[j]
-            end
-            @. result -= @view(cb.values[ax,:])
-            
-            # first, we check if it is a constant
-            if all(==(0), @view(result[2:end]))
-                if result[1] == 0
-                    continue
-                else
-                    return 1, ax
-                end
-
-            # then we check that there is a constant here with 1 or -1 term
-            # this is pretty common and is very easy to solve
-            elseif any(x -> x == 1 || x == -1, @view(result[2:end]))
-                vartoreplace = findfirst(x -> x == 1 || x == -1, @view(result[2:end]))+1
-                if result[vartoreplace] == 1
-                    result .*= -1
-                end
-                result[vartoreplace] = 0
-                replace_var!(constsMap, vartoreplace, result)
-                replace_var!(cb.values, vartoreplace, result)
-
-                
-            # now we must solve the diopantine equation
-            # result \cdot [1 n_1 n_2 ... n_k]^T
-            else
-
-                cnt = count(!=(0), @view(result[2:end]))
-                temp = Vector{MVector{4, Int32}}(undef, cnt)
-                #             bc, u, v, index
-                first = true
-                for i in reverse(eachindex(result))
-                    if result[i] == 0 || i == 1 continue end
-                    if first
-                        first = false
-                        temp[cnt][1] = result[i]
-                        temp[cnt][2] = 1
-                        temp[cnt][3] = 0
-                        temp[cnt][4] = i
-                        cnt -= 1
-                    else
-                        g, u, v = gcdx(result[i], temp[cnt+1][1])
-                        temp[cnt][1] = g
-                        temp[cnt][2] = u
-                        temp[cnt][3] = v
-                        temp[cnt][4] = i
-                        cnt -= 1
-                    end
-                end
-                if mod(result[1], temp[1][4]) != 0
-                    return 2, ax # no solutions error
-                end
-
-                K = first_unused_var!(cb, constsMap)
-                if K > currentVars
-                    currentVars = varvecsize(cb)
-                    constsMap = expand(constsMap)
-                end
-                nc = zeros(Int32, currentVars)
-                ncc = zeros(Int32, currentVars)
-                nc[1] = -div(result[1], temp[1][4])
-                for i in eachindex(temp)
-                    if i == length(temp)
-                       continue 
-                    end 
-                    @. ncc = nc * temp[i][2]
-                    ncc[K] += div(temp[i+1][1], temp[i][1])
-                    replace_var!(cb.values, temp[i][4], ncc)
-                    replace_var!(constsMap, temp[i][4], ncc)
-                    @. nc = nc * temp[i][3]
-                    nc[K] -= div(temp[i][1], temp[i][1])
-                    K = temp[i][4]
-                    if i == length(temp)-1
-                        replace_var!(cb.values, temp[i+1][4], nc)
-                        replace_var!(constsMap, temp[i+1][4], nc)
-                    end
-                end
-
-            end
-
-        else
-            cb.values[ax,1] = value[1]
-            for j in 2:V
-                if value[j] == 0 continue end                
-                if any(!=(0), constsMap[:,j])
-                    # get a new variable, extend if necesary
-                    newvar = first_unused_var!(cb, constsMap)
-                    if newvar > currentVars
-                        currentVars = varvecsize(cb)
-                        constsMap = expand(constsMap)
-                    end
-                    constsMap[newvar, j] = 1
-                end
-
-                @. @view(cb.values[ax,:]) += @view(constsMap[:,j]) * value[j]
-            end
-        end
-    end
-    return 0, 0
-end
-=#
-
 function solve_dioph(c::Constraint, cb::CombinedConstraints, constsMap::CombinedConstraints, axc::Integer)
     error("solve_dioph not yet implemented")
-    return 1, 1
+    return 1000, 1
 end
 
 function outsubst(c::Constraint, cb::CombinedConstraints)
     Ac = avars_size(c)
     Mc = mvars_size(c)
-    Mcb = mvars_size(c)
+    Mcb = mvars_size(cb)
     constsMap = CombinedConstraints(Mc, Mcb)
     # the avars of constsMap are mvars in c
     #   with the first one being a temporary array
@@ -278,17 +151,18 @@ function outsubst(c::Constraint, cb::CombinedConstraints)
     for axc in 1:Ac
         avc = c.tuple[axc]
         axcb = avc
-        if !ax_occupied(cb, axcb)
+        if !avar_occupied(cb, axcb)
             # we haven't encountered this a-var in the combined constants so far
             cb.values[avc, 1] = c.sets[1, axc, 1]
             for mxc in 2:Mc
                 if c.sets[1, axc, mxc] == 0 continue end
-                if !ax_occupied(constsMap, mxc)
+                if !avar_occupied(constsMap, mxc)
                     # if we don't know the value of a m-var in c, we say it is a new m-var in cb
                     mxcb = first_unused_var!(cb, constsMap)
                     constsMap.values[mxc, mxcb] = 1
                 end
-                @. @view(cb.values[axcb, :]) += @view(constsMap.values[mxc, :]) * cb.sets[1, axc, mxc]
+                # println(@view(constsMap.values[mxc, :]) .* c.sets[1, axc, mxc])
+                @. @view(cb.values[axcb, :]) += @view(constsMap.values[mxc, :]) * c.sets[1, axc, mxc]
             end
             continue
         end
@@ -297,10 +171,10 @@ function outsubst(c::Constraint, cb::CombinedConstraints)
         # we require all m-vars in c to have a corresponding value in cb
         for mxc in 2:Mc
             if c.sets[1, axc, mxc] == 0 continue end
-            if !ax_occupied(constsMap, mxc-1)
+            if !avar_occupied(constsMap, mxc)
                 # if we don't know the value of a m-var in c, we say it is a new m-var in cb
                 mxcb = first_unused_var!(cb, constsMap)
-                constsMap.values[mxc-1, mxcb] = 1
+                constsMap.values[mxc, mxcb] = 1
             end
         end
 
@@ -313,13 +187,16 @@ function outsubst(c::Constraint, cb::CombinedConstraints)
 
         # now the constraint is (the a-var in cb) = 0
         # it is a linear diophantine equation
-        
-        if !ax_occupied(constsMap, 1)
+        print("The constraint on cb is: ")
+        print_mvars(stdout, constsMap.values[1,:])
+        print(" = 0\n")
+
+        if !avar_occupied(constsMap, 1)
             # the equation is 0=0, which is compatible, no new information gained
             continue
         end
 
-        if ax_constant(constsMap, 1)
+        if avar_constant(constsMap, 1)
             # the equation is 0=c, incompatible, everything is wrong
             return 1, axcb
         end
@@ -340,18 +217,24 @@ function outsubst(c::Constraint, cb::CombinedConstraints)
         if coef == 1
             @. @view(constsMap.values[1, :]) = - @view(constsMap.values[1, :])
         end
+        # print("the result is: ")
+        # print_mvars(stdout, begin x = zeros(Int32, mvars_size(cb)); x[mxcb] = 1; x end)
+        # print(" = ")
+        # print_mvars(stdout, @view(constsMap.values[1, :]))
+        # print("\n")
+        # print(cb)
         replace_var!(cb, mxcb, @view(constsMap.values[1, :]))
         replace_var!(constsMap, mxcb, @view(constsMap.values[1, :]))
-            
+        # print(cb)
     end
 
     return 0, 0
 end
 
-function should_innersubsts(c::Constraint, cb::CombinedConstraints)
+function should_innersubst(c::Constraint, cb::CombinedConstraints)
     Ac = avars_size(c)
     for axc in 1:Ac
-        if ax_constant(cb, c.tuple[axc])
+        if avar_constant(cb, c.tuple[axc])
             return true 
         end
     end
@@ -364,11 +247,14 @@ function innersubst(c::Constraint, cb::CombinedConstraints)
     S = sets_size(c)
     # this is an outsubst problem
     virtual_cb = CombinedConstraints(Ac, Mc)
-    virtual_tuple = filter(axc -> ax_constant(cb, c.tuple[axc]), eachindex(c.tuple))
+    println(c.tuple, "  ", c.sets)
+    virtual_tuple = filter((axc) -> avar_constant(cb, c.tuple[axc]), eachindex(c.tuple))
+    println(virtual_tuple)
     virtual_c = Constraint(
         virtual_tuple,
-        reshape(map(axc -> cb.values[c.tuple[axc], 1]), (1, length(virtual_tuple), 1))
+        reshape(map(axc -> cb.values[c.tuple[axc], 1], virtual_tuple), (1, length(virtual_tuple), 1))
     )
+    println(virtual_c)
     errax = 0
     errcode = 0
 
@@ -392,7 +278,7 @@ function innersubst(c::Constraint, cb::CombinedConstraints)
     end
 
     # we now shrink the constraint
-    new_sets = Array{Int32, 3}(undef, newS, newA, newMc)
+    new_sets = Array{Int32, 3}(undef, newS, newA, newM)
     new_tuple = Vector{Int32}(undef, newA)
     axxv = 1
     for axc in eachindex(c.tuple)
@@ -408,11 +294,12 @@ function innersubst(c::Constraint, cb::CombinedConstraints)
     map!(axx -> c.tuple[axx], new_tuple, new_tuple)
     c.tuple = new_tuple
     c.sets = new_sets
+    print(c)
     return 0, 0
 end
 
 
-function shape_inference_iteration(cs::Vector{Constraint}, cb::CombinedConstraints; print::Val{_print}=Val(false)) where {_print}
+function shape_inference_iteration(cs::Vector{Constraint}, cb::CombinedConstraints; should_print::Val{_print}=Val(false)) where {_print}
     
     things_did = 1
     while things_did != 0
@@ -442,7 +329,7 @@ function shape_inference_iteration(cs::Vector{Constraint}, cb::CombinedConstrain
 
         # inner substitution
         for ci in eachindex(cs)
-            if should_innersubsts(cs[ci], cb)
+            if should_innersubst(cs[ci], cb)
                 if _print
                     print("---------------------------\nDoing inside substitution for ")
                     print(cs[ci])
@@ -470,8 +357,6 @@ function shape_inference_iteration(cs::Vector{Constraint}, cb::CombinedConstrain
     renormalize_mvars!(cb)
 
 end
-
-
 
 
 # ----------------------
@@ -539,77 +424,18 @@ Base.show(io::IO, cs::Vector{Constraint}) = begin
     print("\n\n")
 end
 
-
-
-# ----------------------
-# EXAMPLE
-# ----------------------
-
-cb = CombinedConstraints(44, 5)
-cs = Constraint[]
-# a1 = a2 is equivalent to:
-push!(cs, Constraint(
-    Int32[1, 2],
-    begin
-        out = Array{Int32, 3}(undef, 1, 2, 2)
-        out[1, 1, :] .= (0, 1)
-        out[1, 2, :] .= (0, 1)
-        out
-    end
-))
-# a3 = 5 is equivalent to:
-push!(cs, Constraint(
-    Int32[3],
-    Int32[5;;;]
-))
-# (a4,a5,a6) = {(n,1,n)} u {(n,n,n)} u {(n,n,1)} is:
-push!(cs, Constraint(
-    Int32[4, 5, 6],
-    begin
-        out = Array{Int32, 3}(undef, 3, 3, 2)
-        out[1, 1, :] .= (0, 1)
-        out[1, 2, :] .= (1, 0)
-        out[1, 3, :] .= (0, 1)
-        out[2, 1, :] .= (0, 1)
-        out[2, 2, :] .= (0, 1)
-        out[2, 3, :] .= (0, 1)
-        out[3, 1, :] .= (0, 1)
-        out[3, 2, :] .= (0, 1)
-        out[3, 3, :] .= (1, 0)
-        out
-    end
-))
-# a9 = a7+a8 is:
-push!(cs, Constraint(
-    Int32[7, 8, 9],
-    begin
-        out = Array{Int32, 3}(undef, 1, 3, 3)
-        out[1, 1, :] .= (0, 1, 0)
-        out[1, 2, :] .= (0, 0, 1)
-        out[1, 3, :] .= (0, 1, 1)
-        out
-    end
-))
-
-cb.values[3, 3] = 3
-cb.values[4, 5] = 6
-cb.values[3, 5] = 3
-cb.values[1, 5] = 2
-cb.values[1, 1] = 9
-cb.values[1, 2] = 9
-cb.values[1, 3] = 1
-print(cb)
-print(cs)
-
 # --------------------
 # FINAL FORM
 # -------------------
 
 macro make_constraint(tuple, sets...)
-    @assert tuple.head == :tuple
-    @assert all(set -> set.head == :tuple, sets)
-    @assert all(set -> length(set.args) == length(tuple.args), sets)
-    println("we have sets")
+    if tuple.head != :tuple || length(sets) == 0
+        !all(set -> set.head == :tuple, sets) || 
+        !all(set -> length(set.args) == length(tuple.args), sets)
+        error("The constraint has incorrect form. The correct form is: \n" *
+            "(tuple of integers representing the indices in the array of shapes (a-vars)) = sets...\n" *
+            "with each set being a tuple of same size containg linear expressions using constants and arbitrarily named variables (m-vars)")
+    end
     
     mvars_dicts = map(set -> begin
         # get number of variables
@@ -632,11 +458,12 @@ macro make_constraint(tuple, sets...)
     A = length(tuple.args)
     M = maximum(d -> length(d)+1, mvars_dicts)
     finalsets = zeros(Int32, (S, A, M))
-    println("-------- mvds")
-    for mvd in mvars_dicts
-        println(mvd)
+
+    function show_err()
+        error("The expressions inside the set must be a linear combination of constants and variables" * 
+        ", so the only allowed operations are +, - and *. You also can't multiply variables together.")
     end
-    
+
     function lc_eval(sx, expr) # it returns an vector of size M being the linear combination of those
         if expr isa Symbol
             toret = zeros(Int32, M)
@@ -648,7 +475,7 @@ macro make_constraint(tuple, sets...)
             return toret
         elseif expr isa Expr
             if expr.head != :call
-                error("Only accepted operations are +, -, and * (a linear combination)")
+                show_err()
             end
             if expr.args[1] == :+
                 return lc_eval(sx, expr.args[2]) .+ lc_eval(sx, expr.args[3])
@@ -660,7 +487,7 @@ macro make_constraint(tuple, sets...)
                 varsa = !all(==(0), @view(va[2:end]))
                 varsb = !all(==(0), @view(vb[2:end]))
                 if varsa && varsb
-                    error("Only accepted operations are +, -, and * (a linear combination)")
+                    show_err()
                 elseif !varsa && !varsb
                     toret = zeros(Int32, M)
                     toret[1] = va[1] * vb[1]
@@ -670,22 +497,16 @@ macro make_constraint(tuple, sets...)
                 end
                 return va .* vb[1]
             else
-                error("Only accepted operations are +, -, and * (a linear combination)")
+                show_err()
             end
         else
-            error("Only accepted operations are +, -, and * (a linear combination)")
+            show_err()
         end
     end
 
-    for set in sets
-        dump(set)
-        println("------")
-    end
     for sx in 1:S, ax in 1:A
         @view(finalsets[sx, ax, :]) .= lc_eval(sx, sets[sx].args[ax])
     end
-    println(finalsets)
-    println(Expr(:ref, :(Int32), tuple.args...))
     return quote
         $(esc(:Constraint))(
             $(esc(Expr(:ref, :(Int32), tuple.args...))),
@@ -726,26 +547,30 @@ function shape_inference(
                     collect((node.index-1)*N .+ (1:N)),
                     reshape(collect(cX.positions[node.feature][3]), (1, N, 1))
                 ))
+                println("appending for ", node)
             end
         elseif node.degree == 1
             traverse(node.l)
             operators.unaops[node.op].push_constraints!(cs, ((node.index-1)*N, (node.l.index-1)*N), Val(N))
+            println("appending for ", node)
         elseif node.degree == 2
             traverse(node.l)
             traverse(node.r)
-            operators.unaops[node.op].push_constraints!(cs, ((node.index-1)*N, (node.l.index-1)*N, (node.l.index-1)*N), Val(N))
+            operators.binops[node.op].push_constraints!(cs, ((node.index-1)*N, (node.l.index-1)*N, (node.r.index-1)*N), Val(N))
+            println("appending for ", node)
         end
     end
     push!(cs, Constraint(
         collect((tree.index-1)*N .+ (1:N)),
         reshape(collect(cX.positions[length(cX.positions)-1][3]), (1, N, 1))
     ))
+    traverse(tree)
 
     println("--------- INITIAL SITUATION ------------")
     print(cb)
     print(cs)
 
-    shape_inference_iteration(cs, cb; print=Val(true))
+    shape_inference_iteration(cs, cb; should_print=Val(true))
 
     # nodes = TensorNode{T,N}[]
     # flatten_tree!(nodes, tree)
@@ -761,5 +586,6 @@ function shape_inference(
     #     end
     # end
 end
+
 
 end

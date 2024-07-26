@@ -187,7 +187,7 @@ function renumber_nodes!(tree::AbstractTensorExprNode)
             return nfeature+1, nindex+1
         elseif node.degree == 0
             node.index = nindex
-            return nfeature+1, nindex
+            return nfeature, nindex+1
         end
     end
     recurse(tree, 2, 1)

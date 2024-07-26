@@ -20,12 +20,12 @@ struct FlattenedTensorList{T,N,IXT,AT<:AbstractVector{T},APosInfo<:AbstractVecto
 end
 
 function treat_as_flattened(buff::AT, sizes::Vector{NTuple{N, IXT}}, max_B::Integer) where {T,IXT,N,AT<:AbstractVector{T}}
-    positions = Vector{FTLPositionInfo{Int32,N}}(undef, f)
+    positions = Vector{FTLPositionInfo{Int32,N}}(undef, length(sizes))
     map!(csize -> (0, prod(csize), csize, (1, cumprod(Base.front(csize))...)), positions, sizes)
     l = positions[end][1] + positions[end][2]
     b = div(length(buff), l)
     b = min(b, max_B)
-    return FlattenedTensorList{T,N,IXT,AT,Vector{FTLPositionInfo{Int32,N}}}(b, l, buff, positions)
+    return FlattenedTensorList{T,N,IXT,AT,Vector{FTLPositionInfo{IXT,N}}}(b, l, buff, positions)
 end
 
 function flatten(::Type{AT}, X::AbstractVector{<:AbstractArray{T,NP1}}; IXT=Int32) where {T,NP1,AT<:AbstractArray}

@@ -3,7 +3,7 @@ module OperatorEnumConstructionModule
 using DispatchDoctor: @unstable
 
 import ..OperatorEnumModule: AbstractOperatorEnum, OperatorEnum, TensorOperatorEnum, GenericOperatorEnum, TensorOperator
-import ..NodeModule: Node, GraphNode, AbstractScalarExprNode, constructorof
+import ..NodeModule: Node, GraphNode, AbstractScalarExprNode, AbstractTensorExprNode, constructorof
 import ..StringsModule: string_tree
 import ..EvaluateModule: eval_tree_array, OPERATOR_LIMIT_BEFORE_SLOWDOWN
 import ..EvaluateDerivativeModule: eval_grad_tree_array, _zygote_gradient
@@ -47,6 +47,9 @@ function Base.show(io::IO, tree::AbstractScalarExprNode)
         latest_operators = LATEST_OPERATORS.x::GenericOperatorEnum
         return print(io, string_tree(tree, latest_operators; kwargs...))
     end
+end
+function Base.show(io::IO, tree::AbstractTensorExprNode)
+    print(io, string_tree(tree, nothing))
 end
 @unstable function (tree::AbstractScalarExprNode)(X; kws...)
     Base.depwarn(
@@ -277,13 +280,6 @@ function _extend_binary_tensor_operator(fname, opnum, internal)
 end
 
 function _extend_unary_tensor_operator(fname, opnum, internal)
-    println("EXTENDING WHOOOO ", fname, "  ", typeof(fname))
-    # println(quote quote
-    #     function $($fname)(l::NodeT) where {T,N,NodeT <: $_AbstractTensorExprNode{T,N}}
-    #         _constructorof(NodeT)(T,N; op=$($opnum), l=l)
-    #     end
-    # end end)
-    
     return quote
         @gensym _constructorof _AbstractTensorExprNode
         quote
