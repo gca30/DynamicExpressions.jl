@@ -28,7 +28,9 @@ struct GenericOperatorEnum{B,U} <: AbstractOperatorEnum
     unaops::U
 end
 
-struct TensorOperator{Finplace,Fext,Fgrad,Fconstr,Fshapef,Fcompl}
+struct TensorOperator{Finplace,Fgrad,Fconstr,Fcompl}
+    symbol_name::Symbol
+        # the name of the operator
     # op::Fdirect
         # gets the value
     op!::Finplace
@@ -45,7 +47,7 @@ struct TensorOperator{Finplace,Fext,Fgrad,Fconstr,Fshapef,Fcompl}
         # computes the derivatives, given the derivative of the output (res) and stores it into ∂l 
         # (res, ∂res, l, ∂l [, r, ∂r], Val(comp)) -> Nothing
         # inputs are arrays
-    append_constraint!::Fconstr 
+    push_constraints!::Fconstr 
         # appends the constraints when trying to infer the shape
         # ...
     # get_shape::Fshapef
@@ -56,35 +58,10 @@ struct TensorOperator{Finplace,Fext,Fgrad,Fconstr,Fshapef,Fcompl}
         # obtains the amount of floating point operations the operation requires (given the shapes)
         # (sl[, sr]) -> Int64
         # inputs are NTuple{N, Int64}
+
+    TensorOperator(; symbol_name, op!::F1, gradient!::F2, push_constraints!::F3, complexity::F4) where {F1,F2,F3,F4} = 
+        new{F1,F2,F3,F4}(symbol_name, op!, gradient!, push_constraints!, complexity)
 end
-
-broadcast_unaop(op::Fnum ; op_complexity=1) where {Fnum} = TensorOperator(
-    (l, res) -> (@. res = op(l)),
-    # (l, res) -> (@. res = op(l)),
-    (res, ∂res, l, ∂l) -> begin
-        map!(first, ∂l, gradient.(op, l))
-        @. ∂l *= ∂res 
-    end,
-    append_constraints_unary_all_equal,
-    sl -> length(sl) * op_complexity
-)
-
-broadcast_binop(op::Fnum ; op_complexity=1) where {Fnum} = TensorOperator(
-    (l, r, res) -> (@. res = op(l, r)),
-    # (l, r, res) -> (@. res = op(l, r)),
-    function(res, ∂res, l, ∂l, r, ∂r, ::Val{comp}) where {comp}
-        grads = gradient.(op, l, r)
-        if comp & 0b10
-            sum!(∂l, ∂res .* map(x->x[1], grads))
-        end
-        if comp & 0b01
-            sum!(∂r, ∂res .* map(x->x[2], grads))
-        end
-    end,
-    append_constraints_broadcasting,
-    (sl, sr) -> 
-        prod(ntuple(i -> max(sl[i], sr[i]), Val(length(sl)))) * op_complexity
-)
 
 """
     TensorOperatorEnum
@@ -92,11 +69,13 @@ broadcast_binop(op::Fnum ; op_complexity=1) where {Fnum} = TensorOperator(
 Defines an enum of operators over tensors. The operators must be inplace.
 """
 struct TensorOperatorEnum{
-    NB, B <: NTuple{NB,<:TensorOperator},
-    NU, U <: NTuple{NU,<:TensorOperator}
+    NB, B <: NTuple{NB, TensorOperator},
+    NU, U <: NTuple{NU, TensorOperator}
 } <: AbstractOperatorEnum
     binops::B
-    unapos::U
+    unaops::U
+
+    TensorOperatorEnum{NB,B,NU,U}(b::B,u::U) where {NB,B,NU,U} = new{NB,B,NU,U}(b,u)
 end
 
 Base.copy(op::AbstractOperatorEnum) = op

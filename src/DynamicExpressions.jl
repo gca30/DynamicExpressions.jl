@@ -10,6 +10,7 @@ using DispatchDoctor: @stable, @unstable
     include("OperatorEnum.jl")
     include("Node.jl")
     include("NodeUtils.jl")
+    include("ShapeInference4.jl")
     include("Strings.jl")
     include("Evaluate.jl")
     include("EvaluateDerivative.jl")
@@ -41,6 +42,7 @@ import .ValueInterfaceModule:
     AbstractScalarExprNode,
     GraphNode,
     Node,
+    TensorNode,
     copy_node,
     set_node!,
     tree_mapreduce,
@@ -68,7 +70,7 @@ import .NodeModule:
     get_scalar_constants,
     set_scalar_constants!
 @reexport import .StringsModule: string_tree, print_tree
-@reexport import .OperatorEnumModule: AbstractOperatorEnum
+@reexport import .OperatorEnumModule: AbstractOperatorEnum, TensorOperatorEnum
 @reexport import .OperatorEnumConstructionModule:
     OperatorEnum, GenericOperatorEnum, @extend_operators, set_default_variable_names!
 @reexport import .EvaluateModule: eval_tree_array, differentiable_eval_tree_array

@@ -173,21 +173,24 @@ end
 # renumbers the nodes to be from 1 to the number of temporary nodes (meaning inputs and constants are not numbered)
 # this removes the information of the original constant indices
 function renumber_nodes!(tree::AbstractTensorExprNode)
-    function recurse(node, nindex) 
+    function recurse(node, nfeature, nindex) 
         if node.degree == 2
-            nindex = recurse(node.l, nindex)
-            nindex = recurse(node.r, nindex)
-            node.feature = nindex
-            return nindex+1
+            nfeature, nindex = recurse(node.l, nfeature, nindex)
+            nfeature, nindex = recurse(node.r, nfeature, nindex)
+            node.feature = nfeature
+            node.index = nindex
+            return nfeature+1, nindex+1
         elseif node.degree == 1
-            nindex = recurse(node.l, nindex)
-            node.feature = nindex
-            return nindex+1
+            nfeature, nindex = recurse(node.l, nfeature, nindex)
+            node.feature = nfeature
+            node.index = nindex
+            return nfeature+1, nindex+1
         elseif node.degree == 0
-            return nindex
+            node.index = nindex
+            return nfeature+1, nindex
         end
     end
-    recurse(tree, 2)
+    recurse(tree, 2, 1)
     return 1
 end
 
@@ -195,6 +198,7 @@ end
 # this removes the information of the original constant indices
 @inline loss_gradient_index_in_buffer(tree) = tree_mapreduce((n -> n.degree == 0 ? 1 : n.feature), max, tree) + 1
 @inline buffer_count(tree) = tree_mapreduce((n -> max(n.grad_ix, n.degree == 0 ? 1 : n.feature)), max, tree)
+@inline number_of_indices(tree) = tree_mapreduce((n -> n.index), max, tree)
 
 function recalculate_has_constants!(tree::AbstractTensorExprNode)
     if tree.degree == 2

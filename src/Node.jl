@@ -180,6 +180,7 @@ mutable struct TensorNode{T,N} <: AbstractTensorExprNode{T,N}
         # The shape of the output
 
     # ------------------- (possibly undefined below)
+    index::Int16 # the index (including constants and variables)
 
     grad_ix::Int16 
         # index of the gradient in the flattened temporary array
@@ -307,7 +308,7 @@ end
 @inline function (::Type{NodeT})(
     arg1::Union{Integer, Val{N}}=Val(0), arg2::Type{T1}=Undefined; feature=nothing, constant=nothing, op=nothing, l::Union{Nothing,AbstractTensorExprNode}=nothing, r=nothing, children=nothing, allocator::F=default_allocator,
 ) where {T1,NodeT<:AbstractTensorExprNode,F,N}
-    N0 = arg1 isa integer ? arg1 : N
+    N0 = arg1 isa Integer ? arg1 : N
     TT = if l !== nothing
         if r !== nothing
             promote_type(
@@ -344,18 +345,18 @@ end
     elseif NN == 0
         error("Number of dimensions not specified in $NodeT constructor")
     else
-        validate_not_all_defaults(NodeT, constant, feature, op, l, r, children)
+        validate_not_all_defaults(NodeT, Val(NN), constant, feature, op, l, r, children)
     end
 
     if children !== nothing
         @assert l === nothing && r === nothing
         if length(children) == 1
-            return tensor_node_factory(NodeT, TT, Val(NN), val, feature, op, only(children), nothing, allocator)
+            return tensor_node_factory(NodeT, Val(NN), TT, constant, feature, op, only(children), nothing, allocator)
         else
-            return tensor_node_factory(NodeT, TT, Val(NN), val, feature, op, children..., allocator)
+            return tensor_node_factory(NodeT, Val(NN), TT, constant, feature, op, children..., allocator)
         end
     end
-    return tensor_node_factory(NodeT, TT, Val(NN), val, feature, op, l, r, allocator)
+    return tensor_node_factory(NodeT, Val(NN), TT, constant, feature, op, l, r, allocator)
 end
 function validate_not_all_defaults(::Type{NodeT}, ::Val{N1}, constant, feature, op, l, r, children) where {NodeT<:AbstractTensorExprNode,N1}
     if constant === nothing && feature === nothing && op === nothing && l === nothing && r === nothing && children === nothing

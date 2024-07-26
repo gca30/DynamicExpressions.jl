@@ -2,7 +2,7 @@ module OperatorEnumConstructionModule
 
 using DispatchDoctor: @unstable
 
-import ..OperatorEnumModule: AbstractOperatorEnum, OperatorEnum, GenericOperatorEnum
+import ..OperatorEnumModule: AbstractOperatorEnum, OperatorEnum, TensorOperatorEnum, GenericOperatorEnum, TensorOperator
 import ..NodeModule: Node, GraphNode, AbstractScalarExprNode, constructorof
 import ..StringsModule: string_tree
 import ..EvaluateModule: eval_tree_array, OPERATOR_LIMIT_BEFORE_SLOWDOWN
@@ -526,5 +526,52 @@ function _overload_common_operators()
     return nothing
 end
 _overload_common_operators()
+
+
+broadcast_unaop(op::Fnum ; op_complexity=1, symbol::Union{Symbol, Nothing}=nothing) where {Fnum} = TensorOperator(;
+    symbol_name = symbol === nothing ? Symbol(op) : symbol,
+    op! = (l, res) -> (@. res = op(l)),
+    # (l, res) -> (@. res = op(l)),
+    gradient! = (res, ∂res, l, ∂l) -> begin
+        map!(first, ∂l, gradient.(op, l))
+        @. ∂l *= ∂res
+    end,
+    push_constraints! = push_constraints_broadcast,
+    complexity = sl -> length(sl) * op_complexity
+)
+
+using ..ShapeInferenceModule: push_constraints_broadcast
+
+broadcast_binop(op::Fnum ; op_complexity=1, symbol::Union{Symbol, Nothing}=nothing) where {Fnum} = TensorOperator(
+    symbol_name = symbol === nothing ? Symbol(op) : symbol,
+    op! = (l, r, res) -> (@. res = op(l, r)),
+    # (l, r, res) -> (@. res = op(l, r)),
+    gradient! = function(res, ∂res, l, ∂l, r, ∂r, ::Val{comp}) where {comp}
+        grads = gradient.(op, l, r)
+        if comp & 0b10
+            sum!(∂l, ∂res .* map(x->x[1], grads))
+        end
+        if comp & 0b01
+            sum!(∂r, ∂res .* map(x->x[2], grads))
+        end
+    end,
+    push_constraints! = push_constraints_broadcast,
+    complexity = (sl, sr) -> 
+        prod(ntuple(i -> max(sl[i], sr[i]), Val(length(sl)))) * op_complexity
+)
+
+using ..OperatorEnumModule
+
+# TODO: ~~move this to OperatorEnumConstruction~~ and make it similar to the other OperatorEnum
+OperatorEnumModule.TensorOperatorEnum(; binary_operators::AbstractVector{<:TensorOperator}=[], unary_operators::AbstractVector{<:TensorOperator}=[]) = begin
+    @assert length(binary_operators) + length(unary_operators) != 0
+    TensorOperatorEnum{
+        length(binary_operators), Tuple{map(typeof, binary_operators)...},
+        length(unary_operators), Tuple{map(typeof, unary_operators)...},
+    }(
+        ntuple(i -> binary_operators[i], Val(length(binary_operators))),
+        ntuple(i -> unary_operators[i], Val(length(unary_operators)))
+    )
+end
 
 end
