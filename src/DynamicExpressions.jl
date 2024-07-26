@@ -40,6 +40,7 @@ import .ValueInterfaceModule:
 @reexport import .NodeModule:
     AbstractNode,
     AbstractScalarExprNode,
+    AbstractTensorExprNode,
     GraphNode,
     Node,
     TensorNode,

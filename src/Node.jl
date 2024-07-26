@@ -383,7 +383,7 @@ end
     ::Type{NodeT}, ::Val{N}, ::Type{T}, ::Nothing, ::Nothing, op::Integer, l::AbstractTensorExprNode{T2,N}, ::Nothing, allocator::F,
 ) where {N,NodeT<:AbstractTensorExprNode,T,T2,F}
     @assert l isa NodeT
-    n = allocator(N, T, Val(N))
+    n = allocator(NodeT, T, Val(N))
     n.degree = 1
     n.op = op
     n.l = l

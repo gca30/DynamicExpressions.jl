@@ -162,7 +162,7 @@ function _extend_unary_operator(
 
             function $($f_outside)(
                 l::N
-            ) where {T<:$($type_requirements),N<:$_AbstractScalarExprNode{T}}
+            ) where {T<: $($type_requirements),N<: $_AbstractScalarExprNode{T}}
                 return if (l.degree == 0 && l.constant)
                     $_constructorof(N)(T; val=$($f_inside)(l.val))
                 else
@@ -191,7 +191,7 @@ function _extend_binary_operator(
 
             function $($f_outside)(
                 l::N, r::N
-            ) where {T<:$($type_requirements),N<:$_AbstractScalarExprNode{T}}
+            ) where {T<: $($type_requirements),N<: $_AbstractScalarExprNode{T}}
                 if (l.degree == 0 && l.constant && r.degree == 0 && r.constant)
                     $_constructorof(N)(T; val=$($f_inside)(l.val, r.val))
                 else
@@ -201,7 +201,7 @@ function _extend_binary_operator(
             end
             function $($f_outside)(
                 l::N, r::T
-            ) where {T<:$($type_requirements),N<:$_AbstractScalarExprNode{T}}
+            ) where {T<: $($type_requirements),N<: $_AbstractScalarExprNode{T}}
                 if l.degree == 0 && l.constant
                     $_constructorof(N)(T; val=$($f_inside)(l.val, r))
                 else
@@ -213,7 +213,7 @@ function _extend_binary_operator(
             end
             function $($f_outside)(
                 l::T, r::N
-            ) where {T<:$($type_requirements),N<:$_AbstractScalarExprNode{T}}
+            ) where {T<: $($type_requirements),N<: $_AbstractScalarExprNode{T}}
                 if r.degree == 0 && r.constant
                     $_constructorof(N)(T; val=$($f_inside)(l, r.val))
                 else
@@ -226,8 +226,8 @@ function _extend_binary_operator(
             if $($build_converters)
                 # Converters:
                 function $($f_outside)(
-                    l::$_AbstractScalarExprNode{T1}, r::$_AbstractScalarExprNode{T2}
-                ) where {T1<:$($type_requirements),T2<:$($type_requirements)}
+                    l:: $_AbstractScalarExprNode{T1}, r:: $_AbstractScalarExprNode{T2}
+                ) where {T1<: $($type_requirements),T2<: $($type_requirements)}
                     if l isa GraphNode || r isa GraphNode
                         error(
                             "Refusing to promote `GraphNode` as it would break the graph structure. " *
@@ -238,15 +238,115 @@ function _extend_binary_operator(
                 end
 
                 function $($f_outside)(
-                    l::$_AbstractScalarExprNode{T1}, r::T2
-                ) where {T1<:$($type_requirements),T2<:$($type_requirements)}
+                    l:: $_AbstractScalarExprNode{T1}, r::T2
+                ) where {T1<: $($type_requirements),T2<: $($type_requirements)}
                     return $($f_outside)(l, convert(T1, r))
                 end
                 function $($f_outside)(
-                    l::T1, r::$_AbstractScalarExprNode{T2}
-                ) where {T1<:$($type_requirements),T2<:$($type_requirements)}
+                    l::T1, r:: $_AbstractScalarExprNode{T2}
+                ) where {T1<: $($type_requirements),T2<: $($type_requirements)}
                     return $($f_outside)(convert(T2, l), r)
                 end
+            end
+        end
+    end
+end
+
+
+function _extend_binary_tensor_operator(fname, opnum, internal)
+    return quote
+        @gensym _constructorof _AbstractTensorExprNode
+        quote
+            if $$internal
+                import ..NodeModule.constructorof as $_constructorof
+                import ..NodeModule.AbstractTensorExprNode as $_AbstractTensorExprNode
+            else
+                using DynamicExpressions:
+                    constructorof as $_constructorof,
+                    AbstractTensorExprNode as $_AbstractTensorExprNode
+            end
+
+            function $($fname)(l::NodeT, r::NodeT) where {T,N,NodeT <: $_AbstractTensorExprNode{T,N}}
+                $_constructorof(NodeT)(N,T; op=$($opnum), l=l, r=r)
+            end
+            function $($fname)(x:: $_AbstractTensorExprNode{T1,N1}, y:: $_AbstractTensorExprNode{T2,N2}) where {T1,N1,T2,N2}
+                error("Incompatible types")
+            end
+        end
+    end
+end
+
+function _extend_unary_tensor_operator(fname, opnum, internal)
+    println("EXTENDING WHOOOO ", fname, "  ", typeof(fname))
+    # println(quote quote
+    #     function $($fname)(l::NodeT) where {T,N,NodeT <: $_AbstractTensorExprNode{T,N}}
+    #         _constructorof(NodeT)(T,N; op=$($opnum), l=l)
+    #     end
+    # end end)
+    
+    return quote
+        @gensym _constructorof _AbstractTensorExprNode
+        quote
+            if $$internal
+                import ..NodeModule.constructorof as $_constructorof
+                import ..NodeModule.AbstractTensorExprNode as $_AbstractTensorExprNode
+            else
+                using DynamicExpressions:
+                    constructorof as $_constructorof,
+                    AbstractTensorExprNode as $_AbstractTensorExprNode
+            end
+
+            function $($fname)(l::NodeT) where {ElemType, NDims, NodeT <: $_AbstractTensorExprNode{ElemType,NDims}}
+                $_constructorof(NodeT)(NDims,ElemType; op=$($opnum), l=l)
+            end
+        end
+    end
+end
+
+# TODO: implement this correctly
+# Now, it requires you to do using DynamicExpressions.OperatorEnumConstructionModule` before
+function _extend_tensor_operators(operators, kws, __module__::Module)
+    if !all(x -> first(x.args) ∈ (:empty_old_operators, :internal, :on_type), kws)
+        error(
+            "You passed the keywords $(kws), but only `empty_old_operators`, `internal`, `on_type` are supported.",
+        )
+    end
+
+    internal_idx = findfirst(x -> hasproperty(x, :args) && first(x.args) == :internal, kws)
+    internal = if internal_idx !== nothing
+        @assert kws[internal_idx].head == :(=)
+        kws[internal_idx].args[2]::Bool
+    else
+        false
+    end
+
+    @gensym fname opnum
+    unaryx = _extend_unary_tensor_operator(fname, opnum, internal)
+    binaryx = _extend_binary_tensor_operator(fname, opnum, internal)
+    return quote
+        # $(if internal
+        #     :(using ..OperatorEnumConstructionModule: _extend_unary_tensor_operator as $unafunc)
+        # else
+        #     :(using DynamicExpressions.OperatorEnumConstructionModule: _extend_unary_operator as $unafunc)
+        # end)
+        lock($LATEST_LOCK) do
+            for ($opnum, top) in enumerate($(operators).unaops)
+                local $fname = top.symbol_name
+                if isdefined(Base, $fname)
+                    $fname = :(Base.$($fname))
+                elseif isdefined($__module__, $fname)
+                    $fname = :($($__module__).$($fname))
+                end
+                eval($unaryx)
+            end
+            for ($opnum, top) in enumerate($(operators).binops)
+                local $fname = top.symbol_name
+                if isdefined(Base, $fname)
+                    $fname = :(Base.$($fname))
+                elseif isdefined($__module__, $fname)
+                    $fname = :($($__module__).$($fname))
+                end
+                eval($binaryx)
             end
         end
     end
@@ -376,14 +476,17 @@ apply this macro to the operator enum in the same module you have the operators
 defined.
 """
 macro extend_operators(operators, kws...)
-    ex = _extend_operators(operators, false, kws, __module__)
     expected_type = AbstractOperatorEnum
+    tensor_type = TensorOperatorEnum
     return esc(
         quote
             if !isa($(operators), $expected_type)
                 error("You must pass an operator enum to `@extend_operators`.")
+            elseif isa($(operators), $tensor_type)
+                $(_extend_tensor_operators(operators, kws, __module__))
+            else
+                $(_extend_operators(operators, false, kws, __module__))
             end
-            $ex
         end,
     )
 end
