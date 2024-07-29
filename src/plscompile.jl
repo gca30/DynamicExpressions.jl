@@ -148,10 +148,19 @@ cb.values[1, 5] = 2
 cb.values[1, 1] = 9
 cb.values[1, 2] = 9
 cb.values[1, 3] = 1
-print(cb)
-print(cs)
+# print(cb)
+# print(cs)
 
 
 buffer = Vector{Float64}(undef, 32)
 cX = treat_as_flattened(buffer, [(3, 3, 1), (1, 3, 1), (3, 1, 1), (1, 1, 1)], 2)
-shape_inference(trees[1], operators, cX)
+
+for i in 1:4
+    print("\n\n\nDOING TREE ", i, "\n\n")
+    try
+  #      shape_inference(trees[i], operators, cX)
+    catch c
+        println(stderr, c)
+        println("TREE ", i, " FAILED\n\n")
+    end
+end

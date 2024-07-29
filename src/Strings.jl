@@ -93,8 +93,14 @@ function string_constant(val)
     end
 end
 
-function string_constant_tensor(feature)
-    return "c$(feature)"
+function string_constant_tensor(feature, shape)
+    str = "c$(feature)<"  
+    for i in eachindex(shape)
+        if i != 1 str *= "x" end
+        str *= "$(shape[i])"
+    end
+    str *= ">"
+    return str
 end
 
 function string_variable(feature, variable_names)
@@ -217,7 +223,7 @@ function string_tree(
             variable_names = variable_names
 
             (leaf,) -> if leaf.constant
-                collect(f_constant(leaf.feature))::Vector{Char}
+                collect(f_constant(leaf.feature, leaf.shape))::Vector{Char}
             else
                 collect(f_variable(leaf.feature, variable_names))::Vector{Char}
             end

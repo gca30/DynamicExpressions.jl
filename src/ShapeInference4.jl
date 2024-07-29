@@ -48,10 +48,12 @@ end
 
 @inline mvar_occupied(cb::CombinedConstraints, mx) = any(!=(0), @view(cb.values[:,mx]))
 @inline mvar_occupied(cbv::AbstractMatrix, mx) = any(!=(0), @view(cbv[:,mx]))
+@inline mvar_occupied(c::Constraint, mx) = any(sx -> mvar_occupied(@view(c.sets[sx, :, :]), mx), axes(c.sets, 1))
 @inline avar_occupied(cb::CombinedConstraints, ax) = any(!=(0), @view(cb.values[ax,:]))
 @inline avar_constant(cb::CombinedConstraints, ax) = cb.values[ax,1] != 0 && all(==(0), @view(cb.values[ax,2:end]))
 @inline avar_count(cb::CombinedConstraints) = count(ax -> avar_occupied(cb, ax), axes(cb.values, 1))
-@inline mvar_count(cb::CombinedConstraints) = count(mx -> mvar_occupied(cb, mx), 2:size(cb, 2))+1
+@inline mvar_count(cb::CombinedConstraints) = count(mx -> mvar_occupied(cb, mx), 2:size(cb.values, 2))+1
+@inline mvar_count(cbv::AbstractMatrix) = count(mx -> mvar_occupied(cbv, mx), 2:size(cbv, 2))+1
 @inline Base.isempty(c::Constraint) = length(c.sets) == 0
 
 first_unused_var!(cb::CombinedConstraints) = begin
@@ -117,6 +119,16 @@ function renormalize_mvars!(cb::CombinedConstraints)
     end 
     cb.values = copy(@view(cb.values[:, 1:nmx]))
     return nmx
+end
+
+function renormalize_mvars!(c::Constraint)
+    tmx = 0
+    for sx in axes(c.sets, 1)
+        nmx = renormalize_mvars!(@view(c.sets[sx,:,:]))
+        tmx = max(tmx, nmx)
+    end
+    c.sets = copy(@view(c.sets[:,:,1:tmx]))
+    return tmx
 end
 
 function check_valid(cb::CombinedConstraints)
@@ -301,11 +313,191 @@ function innersubst(c::Constraint, cb::CombinedConstraints)
     return 0, 0
 end
 
-function split_if_possible(cs::AbstractVector{Constraint}, ci::Integer)
-    # only works on constants for now
-    if sets_size(cs[ci]) < 2
-        return
+# 0 if they are not subsets of each other
+# 1 if s1 is a subset of s2
+# 2 if s2 is a subset of s1
+# 3 if they are equivalent
+function subset_comparison(c::Constraint, s1::Integer, s2::Integer)
+    # s1 is a subset of s2 if we can find variables such that the equation is compatible
+    # this can be done using outsubst (we say we have a set that is the combined constraints and a set that is )
+    Mb = mvars_size(c)
+    Ab = avars_size(c)
+    virtual_cb = CombinedConstraints(Ab, Mb)
+    virtual_cb.values .= @view(c.sets[s1, :, :])
+    virtual_c = Constraint(collect(1:Ab), c.sets[s2:s2,:,:])
+    initial_mvars_1 = mvar_count(@view(c.sets[s1,:,:]))
+    initial_mvars_2 = mvar_count(@view(c.sets[s2,:,:]))
+    ercode, _ = outsubst(virtual_c, virtual_cb)
+    if ercode != 0 # not compatible
+        return 0
+    elseif initial_mvars_1 == initial_mvars_2 
+        # they are the same dimensional constraint, and if they are compatible, it means they are equivalent
+        return 3
+    elseif initial_mvars_1 < initial_mvars_2
+        return 1
+    else
+        return 2
     end
+    
+end
+
+function simplify(cs::AbstractVector{Constraint}, ci::Integer)
+    # simplifies constraints that have redundant sets
+    Sb = sets_size(cs[ci])
+    if Sb < 2 return 0, 0 end
+    Mb = mvars_size(cs[ci])
+    Ab = avars_size(cs[ci])
+    
+    # for every set, we check if there is a set that is a subset of the original
+    # if it is, we remove it
+    save_map = zeros(Int32, Sb)
+    save_map[1] = 1
+    save_count = 1
+    for sx in 2:Sb
+        save_flag = true
+        for j in 1:(sx-1)
+            sc = subset_comparison(cs[ci], sx, j)
+            if sc == 0 # incompatible
+                # save the set if there are only incompatibilities
+                continue
+            elseif sc == 1 || sc == 3 # sx subset of j or equivalent set
+                # don't save the set
+                # do nothing with it
+                save_flag = false
+                break  
+            elseif sc == 2 # j subset of sc
+                # replace the set with sc
+                # don't save as a new set
+                save_map[sx] = save_map[j]
+                save_map[j] = 0
+                save_flag = false
+                break
+            end
+            # if they are equal we must onyl remove 1
+            #if j > sx && @view(cs[ci].sets[sx, :, :]) == @view(cs[ci].sets[j, :, :]) continue end 
+        end
+
+        if save_flag
+            save_map[sx] = save_count+1
+            save_count += 1
+        end
+    end
+
+    new_sets = Array{Int32, 3}(undef, save_count, Ab, Mb)
+    for savex in eachindex(save_map)
+        if save_map[savex] == 0 continue end
+        @view(new_sets[save_count,:,:]) .=  @view(cs[ci].sets[save_map[savex],:,:])
+        save_count -= 1
+    end
+    cs[ci].sets = new_sets
+    renormalize_mvars!(cs[ci])
+    for sx in axes(cs[ci].sets, 1), ax in axes(cs[ci].sets, 2)
+        if all(==(0), @view(cs[ci].sets[sx,ax,2:end])) && cs[ci].sets[sx,ax,1] < 0
+            return 33, ci
+        end
+    end
+
+    return 0, 0
+end
+
+function split_by_variables(cs::AbstractVector{Constraint}, ci::Integer)
+    Sb = sets_size(cs[ci])
+    if Sb < 2 return 0, 0 end
+    Mb = mvars_size(cs[ci])
+    Ab = avars_size(cs[ci])
+    avars_map = zeros(Int32, Ab)
+    mvars_map = zeros(Int32, Mb-1) # what constraint does the mvar fall in (0 for not yet determined)
+    ccount = 0
+    count_minus1 = 0
+    for sx in 1:Sb, ax in 1:Ab
+        if avars_map[ax] != -1 && cs[ci].sets[sx, ax, 1] != cs[ci].sets[1, ax, 1]
+            avars_map[ax] = -1 # means that we should include it in every set, except the constants one
+            count_minus1 += 1
+        end
+    end
+
+    for sx in 1:Sb
+        mvars_map .= 0
+        for ax in 1:Ab, mx in 2:Mb
+            if cs[ci].sets[sx, ax, mx] == 0
+                continue
+            end
+            mm = mvars_map[mx-1]
+            am = avars_map[ax]
+            if mm == 0 && am != 0
+                mvars_map[mx-1] = am
+            elseif mm != 0 && am == 0
+                avars_map[ax] = mm
+            elseif mm == 0 && am == 0
+                avars_map[ax] = ccount + 1
+                mvars_map[mx-1] = ccount + 1
+                ccount += 1
+            elseif mm != am && am != -1
+                toreplace = max(mm, am)
+                replacedwith = min(mm, am)
+                replace!(x -> x == toreplace ? replacedwith : (x > toreplace ? x-1 : x), mvars_map)
+                replace!(x -> x == toreplace ? replacedwith : (x > toreplace ? x-1 : x), avars_map)
+                ccount -= 1
+            elseif mm != am && am == -1
+                replace!(x -> x == mm ? -1 : (x > mm ? x-1 : x), mvars_map)
+                ccount -= 1 
+            end
+        end
+    end
+
+    # when avars_map contains -1, means that we have constants that differ depending on the case
+    # when avars_map contains 0, it means that it is a constant that is the same across the field
+    # when avars_map contains >0, it means that we can split in evenly
+    count_0 = count(==(0), avars_map)
+    if count_0 != 0
+        new_tuple = filter(x -> avars_map[x] == 0, eachindex(avars_map))
+        new_sets = Array{Int32, 3}(undef, 1, length(new_tuple), 1)
+        for nax in eachindex(new_tuple)
+            new_sets[1, nax, 1] = cs[ci].sets[1, new_tuple[nax], 1]
+        end
+        replace!(x -> cs[ci].tuple[x], new_tuple)
+        push!(cs, Constraint(
+            new_tuple, new_sets
+        ))
+    end
+    for i in 1:ccount
+        new_tuple = filter(x -> avars_map[x] == i || avars_map[x] == -1, eachindex(avars_map))
+        new_sets = Array{Int32, 3}(undef, Sb, length(new_tuple), Mb)
+        for nax in eachindex(new_tuple)
+            @view(new_sets[:, nax, :]) .= @view(cs[ci].sets[:, new_tuple[nax], :])
+        end
+        replace!(x -> cs[ci].tuple[x], new_tuple)
+        push!(cs, Constraint(
+            new_tuple, new_sets
+        ))
+        erc, erv = simplify(cs, length(cs))
+        if erc != 0
+            return erc, erv
+        end
+    end
+    if ccount == 0
+        new_tuple = filter(x -> avars_map[x] == -1, eachindex(avars_map))
+        new_sets = Array{Int32, 3}(undef, Sb, length(new_tuple), Mb)
+        for nax in eachindex(new_tuple)
+            @view(new_sets[:, nax, :]) .= @view(cs[ci].sets[:, new_tuple[nax], :])
+        end
+        replace!(x -> cs[ci].tuple[x], new_tuple)
+        push!(cs, Constraint(
+            new_tuple, new_sets
+        ))
+        erc, erv = simplify(cs, length(cs))
+        if erc != 0
+            return erc, erv
+        end
+    end
+    cs[ci] = zero(Constraint)
+
+    return 0,0
+end
+
+function split_by_constant(cs::AbstractVector{Constraint}, ci::Integer)
+    Sb = sets_size(cs[ci])
+    if Sb < 2 return end
 
     new_tuple = Vector{Int32}(undef, 0)
     for axb in axes(cs[ci].sets, 2)
@@ -347,6 +539,10 @@ function split_if_possible(cs::AbstractVector{Constraint}, ci::Integer)
     push!(cs, Constraint(new_tuple, new_sets))
 end
 
+function split_and_simplify(cs::AbstractVector{Constraint}, ci::Integer)
+    return split_by_variables(cs, ci)
+end
+
 
 function shape_inference_iteration(cs::Vector{Constraint}, cb::CombinedConstraints; should_print::Val{_print}=Val(false)) where {_print}
     
@@ -386,7 +582,10 @@ function shape_inference_iteration(cs::Vector{Constraint}, cb::CombinedConstrain
                 if code != 0
                     error("Error code $(code), conflicting a-variable $(ax)")
                 end
-                split_if_possible(cs, ci)
+                code, ax = split_and_simplify(cs, ci)
+                if code != 0
+                    error("Error code $(code), conflicting a-variable $(ax)")
+                end
                 if _print
                     println(cb)
                     println(cs)
@@ -609,17 +808,27 @@ function shape_inference(
                     collect((node.index-1)*N .+ (1:N)),
                     reshape(collect(cX.positions[node.feature][3]), (1, N, 1))
                 ))
-                println("appending for ", node)
+                println("appending for ", node, " : ", cs[length(cs)])
             end
         elseif node.degree == 1
             traverse(node.l)
+            i = length(cs)+1
             operators.unaops[node.op].push_constraints!(cs, ((node.index-1)*N, (node.l.index-1)*N), Val(N))
-            println("appending for ", node)
+            print("appending for ", node, " : ")
+            for ix in i:length(cs)
+                print(cs[ix], "   ")
+            end
+            print("\n")
         elseif node.degree == 2
             traverse(node.l)
             traverse(node.r)
+            i = length(cs)+1
             operators.binops[node.op].push_constraints!(cs, ((node.index-1)*N, (node.l.index-1)*N, (node.r.index-1)*N), Val(N))
-            println("appending for ", node)
+            print("appending for ", node, " : ")
+            for ix in i:length(cs)
+                print(cs[ix], "   ")
+            end
+            print("\n")
         end
     end
     push!(cs, Constraint(
@@ -632,7 +841,28 @@ function shape_inference(
     println(cb)
     println(cs)
 
-    shape_inference_iteration(cs, cb; should_print=Val(true))
+    while true
+        shape_inference_iteration(cs, cb; should_print=Val(true))
+        println("------- PARTIALLY FINAL SITUATION ------------")
+        println(cb)
+        println(cs)
+        if length(cs) != 0
+            S = sets_size(cs[1])
+            s = rand(UInt32)%S+1
+            cs[1] = Constraint(cs[1].tuple, cs[1].sets[s:s,:,:])
+        elseif mvars_size(cb) != 1
+            z = zeros(Int32, mvars_size(cb))
+            z[1] = rand(UInt32)%5+1 # TODO: create some sort of generator
+            replace_var!(cb, 2, z)
+        else
+            break
+        end
+    end
+
+    println("------- FULLY FINAL SITUATION ------------")
+    println(cb)
+    println(cs)
+    
 
     # nodes = TensorNode{T,N}[]
     # flatten_tree!(nodes, tree)
