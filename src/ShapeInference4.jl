@@ -52,6 +52,7 @@ end
 @inline avar_constant(cb::CombinedConstraints, ax) = cb.values[ax,1] != 0 && all(==(0), @view(cb.values[ax,2:end]))
 @inline avar_count(cb::CombinedConstraints) = count(ax -> avar_occupied(cb, ax), axes(cb.values, 1))
 @inline mvar_count(cb::CombinedConstraints) = count(mx -> mvar_occupied(cb, mx), 2:size(cb, 2))+1
+@inline Base.isempty(c::Constraint) = length(c.sets) == 0
 
 first_unused_var!(cb::CombinedConstraints) = begin
     for mx in axes(cb.values, 2)
@@ -178,8 +179,9 @@ function outsubst(c::Constraint, cb::CombinedConstraints)
             end
         end
 
-        @. @view(constsMap.values[1, :]) = - @view(cb.values[axcb, :]) 
+        @. @view(constsMap.values[1, :]) = -@view(cb.values[axcb, :])
         # the constraint is (the a-var in c) = (the a-var in cb)
+        constsMap.values[1, 1] += c.sets[1, axc, 1]
         for mxc in 2:Mc
             if c.sets[1, axc, mxc] == 0 continue end
             @. @view(constsMap.values[1, :]) += @view(constsMap.values[mxc, :])
@@ -222,10 +224,10 @@ function outsubst(c::Constraint, cb::CombinedConstraints)
         # print(" = ")
         # print_mvars(stdout, @view(constsMap.values[1, :]))
         # print("\n")
-        # print(cb)
+        # println(cb)
         replace_var!(cb, mxcb, @view(constsMap.values[1, :]))
         replace_var!(constsMap, mxcb, @view(constsMap.values[1, :]))
-        # print(cb)
+        # println(cb)
     end
 
     return 0, 0
@@ -247,9 +249,7 @@ function innersubst(c::Constraint, cb::CombinedConstraints)
     S = sets_size(c)
     # this is an outsubst problem
     virtual_cb = CombinedConstraints(Ac, Mc)
-    println(c.tuple, "  ", c.sets)
     virtual_tuple = filter((axc) -> avar_constant(cb, c.tuple[axc]), eachindex(c.tuple))
-    println(virtual_tuple)
     virtual_c = Constraint(
         virtual_tuple,
         reshape(map(axc -> cb.values[c.tuple[axc], 1], virtual_tuple), (1, length(virtual_tuple), 1))
@@ -258,17 +258,20 @@ function innersubst(c::Constraint, cb::CombinedConstraints)
     errax = 0
     errcode = 0
 
+    new_sets_u = Array{Int32, 3}(undef, S, Ac, Mc)
     newS = 0
     newM = 1
     newA = Ac - length(virtual_tuple)
     for sx in 1:S
         @. virtual_cb.values = @view(c.sets[sx, :, :])
+        # println("WE HAVE: ", virtual_cb)
+        # println("WITH ", virtual_c)
         errcode, errax = outsubst(virtual_c, virtual_cb)
         if errcode != 0
             continue
         end
         newS += 1
-        @. @view(c.sets[newS, :, :]) = virtual_cb.values
+        @. @view(new_sets_u[newS, :, :]) = virtual_cb.values
         Ms = renormalize_mvars!(@view(c.sets[newS, :, :]))
         newM = max(newM, Ms)
     end
@@ -289,13 +292,59 @@ function innersubst(c::Constraint, cb::CombinedConstraints)
         end
     end
     for sx in 1:newS, ax in 1:newA
-        @. @view(new_sets[sx, ax, :]) = @view(c.sets[sx, new_tuple[ax], 1:newM])
+        @. @view(new_sets[sx, ax, :]) = @view(new_sets_u[sx, new_tuple[ax], 1:newM])
     end
     map!(axx -> c.tuple[axx], new_tuple, new_tuple)
     c.tuple = new_tuple
     c.sets = new_sets
-    print(c)
+    println("NEW VALUE: ", c)
     return 0, 0
+end
+
+function split_if_possible(cs::AbstractVector{Constraint}, ci::Integer)
+    # only works on constants for now
+    if sets_size(cs[ci]) < 2
+        return
+    end
+
+    new_tuple = Vector{Int32}(undef, 0)
+    for axb in axes(cs[ci].sets, 2)
+        is_fine = true
+        for sx in axes(cs[ci].sets, 1)
+            if any(!=(0), @view(cs[ci].sets[sx, axb, 2:end]))
+                is_fine = false
+                break
+            end
+            if cs[ci].sets[sx, axb, 1] != cs[ci].sets[1, axb, 1]
+                is_fine = false
+                break
+            end
+        end
+        if !is_fine
+            continue
+        end
+        push!(new_tuple, axb)
+    end
+    if length(new_tuple) == 0
+        return
+    end
+    new_sets = Array{Int32, 3}(undef, 1, length(new_tuple), 1)
+    remaining_tuple = Vector{Int32}(undef, length(cs[ci].tuple)-length(new_tuple))
+    remaining_sets = Array{Int32, 3}(undef, sets_size(cs[ci]), length(cs[ci].tuple)-length(new_tuple), mvars_size(cs[ci]))
+    axn = 1
+    for axb in axes(cs[ci].sets, 2)
+        if axn <= length(new_tuple) && axb == new_tuple[axn]
+            new_sets[1,axn,1] = cs[ci].sets[1,axb,1]
+            axn += 1
+        else
+            remaining_tuple[axb-axn+1] = cs[ci].tuple[axb]
+            @view(remaining_sets[:,axb-axn+1,:]) .= @view(cs[ci].sets[:,axb,:])
+        end
+    end
+    map!(axb -> cs[ci].tuple[axb], new_tuple, new_tuple)
+    cs[ci].tuple = remaining_tuple
+    cs[ci].sets = remaining_sets
+    push!(cs, Constraint(new_tuple, new_sets))
 end
 
 
@@ -311,8 +360,7 @@ function shape_inference_iteration(cs::Vector{Constraint}, cb::CombinedConstrain
                 things_did += 1
                 if _print
                     print("---------------------------\nDoing outside substitution for ")
-                    print(cs[ci])
-                    print("\n")
+                    println(cs[ci])
                 end
                 code, ax = outsubst(cs[ci], cb)
                 if code != 0
@@ -320,9 +368,8 @@ function shape_inference_iteration(cs::Vector{Constraint}, cb::CombinedConstrain
                 end
                 cs[ci] = zero(Constraint)
                 if _print
-                    print(cb)
-                    print(cs)
-                    print("\n")
+                    println(cb)
+                    println(cs)
                 end
             end
         end
@@ -332,26 +379,29 @@ function shape_inference_iteration(cs::Vector{Constraint}, cb::CombinedConstrain
             if should_innersubst(cs[ci], cb)
                 if _print
                     print("---------------------------\nDoing inside substitution for ")
-                    print(cs[ci])
-                    print("\n")
+                    println(cs[ci])
                 end
                 things_did += 1
                 code, ax = innersubst(cs[ci], cb)
                 if code != 0
                     error("Error code $(code), conflicting a-variable $(ax)")
                 end
+                split_if_possible(cs, ci)
                 if _print
-                    print(cb)
-                    print(cs)
-                    print("\n")
+                    println(cb)
+                    println(cs)
                 end
             end
         end
 
-        code, ax = check_valid(cb)
-        if code != 0
-            error("Error code $(code), conflicting a-variable $(ax)")
+        if things_did > 0
+            filter!(c -> !isempty(c), cs)
         end
+
+        # code, ax = check_valid(cb)
+        # if code != 0
+        #     error("Error code $(code), conflicting a-variable $(ax)")
+        # end
 
     end
     renormalize_mvars!(cb)
@@ -412,7 +462,7 @@ Base.show(io::IO, cb::CombinedConstraints) = begin
         print_mvars(io, cb.values[ax,:])
         print(io, "\n")
     end
-    print(io, "\n")
+    #print(io, "\n")
 end
 
 Base.show(io::IO, cs::Vector{Constraint}) = begin
@@ -421,7 +471,7 @@ Base.show(io::IO, cs::Vector{Constraint}) = begin
         print(io, "  ")
         print(io, c)
     end, "\n", cs)
-    print("\n\n")
+    # print("\n\n")
 end
 
 # --------------------
@@ -478,24 +528,36 @@ macro make_constraint(tuple, sets...)
                 show_err()
             end
             if expr.args[1] == :+
-                return lc_eval(sx, expr.args[2]) .+ lc_eval(sx, expr.args[3])
-            elseif expr.args[1] == :-
-                return lc_eval(sx, expr.args[2]) .+ lc_eval(sx, expr.args[3])
-            elseif expr.args[1] == :*
-                va = lc_eval(sx, expr.args[2])
-                vb = lc_eval(sx, expr.args[3])
-                varsa = !all(==(0), @view(va[2:end]))
-                varsb = !all(==(0), @view(vb[2:end]))
-                if varsa && varsb
-                    show_err()
-                elseif !varsa && !varsb
-                    toret = zeros(Int32, M)
-                    toret[1] = va[1] * vb[1]
-                    return toret
-                elseif !varsa && varsb
-                    va, vb = vb, va
+                toret = zeros(Int32, M)
+                for i in 2:length(expr.args)
+                    toret .+= lc_eval(sx, expr.args[i])
                 end
-                return va .* vb[1]
+                return toret
+            elseif expr.args[1] == :-
+                if length(expr.args) == 3
+                    return lc_eval(sx, expr.args[2]) .- lc_eval(sx, expr.args[3])
+                elseif length(expr.args) == 2
+                    return .- lc_eval(sx, expr.args[2])
+                else
+                    show_err()
+                end
+            elseif expr.args[1] == :*
+                vv = map(ex -> lc_eval(sx, ex), expr.args[2:end])
+                count_vv = count(ve -> !all(==(0), @view(ve[2:end])), vv)
+                if count_vv == 0
+                    toret = zeros(Int32, M)
+                    toret[1] = prod(ve -> ve[1], vv)
+                    return toret
+                elseif count_vv == 1
+                    varx = findfirst(ve -> !all(==(0), @view(ve[2:end])), vv)
+                    for i in eachindex(vv)
+                        if i == varx continue end
+                        vv[varx] .*= vv[i][1]
+                    end
+                    return vv[varx]
+                else
+                    show_err()
+                end
             else
                 show_err()
             end
@@ -567,8 +629,8 @@ function shape_inference(
     traverse(tree)
 
     println("--------- INITIAL SITUATION ------------")
-    print(cb)
-    print(cs)
+    println(cb)
+    println(cs)
 
     shape_inference_iteration(cs, cb; should_print=Val(true))
 
