@@ -158,7 +158,7 @@ cX = treat_as_flattened(buffer, [(3, 3, 1), (1, 3, 1), (3, 1, 1), (1, 1, 1)], 2)
 for i in 1:4
     print("\n\n\nDOING TREE ", i, "\n\n")
     try
-  #      shape_inference(trees[i], operators, cX)
+       shape_inference(trees[i], operators, cX; should_print=Val(false))
     catch c
         println(stderr, c)
         println("TREE ", i, " FAILED\n\n")

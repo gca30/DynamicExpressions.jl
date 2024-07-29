@@ -82,9 +82,6 @@ function replace_var!(cb::CombinedConstraints, mx, val::AbstractVector{Int32})
         if cb.values[ax, mx] == 0 
             continue
         end
-        # print("finally found m$(mx) in: a$(ax) = ")
-        # print_mvars(stdout, cb.values[ax,:])
-        # print("\n")
         coef = cb.values[ax, mx]
         cb.values[ax, mx] = 0
         @. @view(cb.values[ax,:]) += val * coef
@@ -201,9 +198,9 @@ function outsubst(c::Constraint, cb::CombinedConstraints)
 
         # now the constraint is (the a-var in cb) = 0
         # it is a linear diophantine equation
-        print("The constraint on cb is: ")
-        print_mvars(stdout, constsMap.values[1,:])
-        print(" = 0\n")
+        # print("The constraint on cb is: ")
+        # print_mvars(stdout, constsMap.values[1,:])
+        # print(" = 0\n")
 
         if !avar_occupied(constsMap, 1)
             # the equation is 0=0, which is compatible, no new information gained
@@ -266,7 +263,7 @@ function innersubst(c::Constraint, cb::CombinedConstraints)
         virtual_tuple,
         reshape(map(axc -> cb.values[c.tuple[axc], 1], virtual_tuple), (1, length(virtual_tuple), 1))
     )
-    println(virtual_c)
+    # println(virtual_c)
     errax = 0
     errcode = 0
 
@@ -309,7 +306,7 @@ function innersubst(c::Constraint, cb::CombinedConstraints)
     map!(axx -> c.tuple[axx], new_tuple, new_tuple)
     c.tuple = new_tuple
     c.sets = new_sets
-    println("NEW VALUE: ", c)
+    # println("NEW VALUE: ", c)
     return 0, 0
 end
 
@@ -791,8 +788,9 @@ end
 function shape_inference(
     tree::TensorNode{T,N},
     operators::TensorOperatorEnum,
-    cX::FlattenedTensorList{T,N},
-) where {N,T}
+    cX::FlattenedTensorList{T,N};
+    should_print::Val{_print}=Val(false)
+) where {N,T,_print}
 
     # now we have indices
     renumber_nodes!(tree)
@@ -808,27 +806,33 @@ function shape_inference(
                     collect((node.index-1)*N .+ (1:N)),
                     reshape(collect(cX.positions[node.feature][3]), (1, N, 1))
                 ))
-                println("appending for ", node, " : ", cs[length(cs)])
+                if _print
+                    println("appending for ", node, " : ", cs[length(cs)])
+                end
             end
         elseif node.degree == 1
             traverse(node.l)
             i = length(cs)+1
             operators.unaops[node.op].push_constraints!(cs, ((node.index-1)*N, (node.l.index-1)*N), Val(N))
-            print("appending for ", node, " : ")
-            for ix in i:length(cs)
-                print(cs[ix], "   ")
+            if _print
+                print("appending for ", node, " : ")
+                for ix in i:length(cs)
+                    print(cs[ix], "   ")
+                end
+                print("\n")
             end
-            print("\n")
         elseif node.degree == 2
             traverse(node.l)
             traverse(node.r)
             i = length(cs)+1
             operators.binops[node.op].push_constraints!(cs, ((node.index-1)*N, (node.l.index-1)*N, (node.r.index-1)*N), Val(N))
-            print("appending for ", node, " : ")
-            for ix in i:length(cs)
-                print(cs[ix], "   ")
+            if _print
+                print("appending for ", node, " : ")
+                for ix in i:length(cs)
+                    print(cs[ix], "   ")
+                end
+                print("\n")
             end
-            print("\n")
         end
     end
     push!(cs, Constraint(
@@ -837,33 +841,41 @@ function shape_inference(
     ))
     traverse(tree)
 
-    println("--------- INITIAL SITUATION ------------")
-    println(cb)
-    println(cs)
-
-    while true
-        shape_inference_iteration(cs, cb; should_print=Val(true))
-        println("------- PARTIALLY FINAL SITUATION ------------")
+    if _print
+        println("--------- INITIAL SITUATION ------------")
         println(cb)
         println(cs)
+    end
+
+    while true
+        shape_inference_iteration(cs, cb; should_print=Val(_print))
+        if _print
+            println("------- PARTIALLY FINAL SITUATION ------------")
+            println(cb)
+            println(cs)
+        end
         if length(cs) != 0
             S = sets_size(cs[1])
             s = rand(UInt32)%S+1
             cs[1] = Constraint(cs[1].tuple, cs[1].sets[s:s,:,:])
         elseif mvars_size(cb) != 1
             z = zeros(Int32, mvars_size(cb))
-            z[1] = rand(UInt32)%5+1 # TODO: create some sort of generator
+            z[1] = rand(UInt32)%5+1 
+                # TODO: create some sort of generator, given the already used shape, the operator, the nodes, etc
+                # maybe each operator should have a default generator that is random?
+                # this also means that
             replace_var!(cb, 2, z)
         else
             break
         end
     end
 
-    println("------- FULLY FINAL SITUATION ------------")
-    println(cb)
-    println(cs)
+    if _print
+        println("------- FULLY FINAL SITUATION ------------")
+        println(cb)
+        println(cs)
+    end
     
-
     # nodes = TensorNode{T,N}[]
     # flatten_tree!(nodes, tree)
     # if throw_errors
