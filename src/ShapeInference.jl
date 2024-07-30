@@ -1,1043 +1,865 @@
-using DynamicExpressions: Node, AbstractNode, @extend_operators, OperatorEnum
 
-c1 = Node(Array{Float64,4}; val=fill(1, (1, 1, 1, 1)))
-c2 = Node(Array{Float64,4}; val=fill(2, (1, 1, 1, 1)))
-c3 = Node(Array{Float64,4}; val=fill(3, (1, 1, 1, 1)))
-c4 = Node(Array{Float64,4}; val=fill(4, (1, 1, 1, 1)))
-c5 = Node(Array{Float64,4}; val=fill(5, (1, 1, 1, 1)))
-x1 = Node(Array{Float64,4}; feature=1)
-x2 = Node(Array{Float64,4}; feature=2)
-x3 = Node(Array{Float64,4}; feature=3)
+module ShapeInferenceModule
 
-# dummy operators
+using ...NodeModule: TensorNode
+using ..OperatorEnumModule: TensorOperatorEnum
+using ..FlattenedTensorListModule: FlattenedTensorList
+using ...NodeUtilsModule: renumber_nodes!, number_of_indices
 
-function cross(x::AbstractArray{T,N}, y::AbstractArray{T,N}) where {T<:Number,N}
-    @assert N >= 1
-    @assert size(x) == size(y)
-    @assert size(x, 1) == 3
-    return rand(size(x))
+# ----------------------
+# DEFINITIONS
+# ----------------------
+
+mutable struct Constraint
+    tuple :: Vector{Int32} # the a-variable numbers
+    sets :: Array{Int32, 3} 
+    # the axes represent:
+        # 1. the union axis (how many options are there)
+        # 2. the a-variable axis (wth length equal to length(tuple))
+        # 3. the m-variable axis (with the first element in that axis being constant and others variables)
 end
 
-function matmult(x::AbstractArray{T,N}, y::AbstractArray{T,N}) where {T<:Number,N}
-    @assert N >= 2
-    @assert size(x)[3:end] == size(y)[3:end]
-    @assert size(x, 2) == size(y, 1)
-    return rand(size(x, 1), size(x, 2), size(x)[3:end]...)
+# the outside is stored as:
+mutable struct CombinedConstraints
+    values :: Matrix{Int32}
+    # the union axis size is implied to be 1, and the tuple is taken to be the range from 1 to the number of avars
+    CombinedConstraints(A, M) = new(zeros(Int32, A, M))
 end
 
-macro define_matmult(firstAxis, secondAxis, N, T)
-    @assert typeof(firstAxis) == Int64
-    @assert typeof(secondAxis) == Int64
-    @assert typeof(N) == Int64
-    @assert firstAxis != secondAxis
-    if secondAxis < firstAxis
-        firstAxis, secondAxis = secondAxis, firstAxis
+
+
+# ----------------------
+# HELPER FUNCTIONS
+# ----------------------
+
+@inline Base.zero(::Type{Constraint}) = Constraint(Vector{Int32}(undef, 0), Array{Int32, 3}(undef, 0, 0, 0))
+@inline sets_size(c::Constraint) = size(c.sets, 1)
+@inline avars_size(c::Constraint) = size(c.sets, 2)
+@inline mvars_size(c::Constraint) = size(c.sets, 3)
+
+@inline sets_size(cb::CombinedConstraints) = 1
+@inline avars_size(cb::CombinedConstraints) = size(cb.values, 1)
+@inline mvars_size(cb::CombinedConstraints) = size(cb.values, 2)
+
+@inline expand_mvars(mat::Matrix) = cat(mat, zeros(eltype(mat), size(mat)...); dims=2)
+@inline expand_mvars!(cb::CombinedConstraints) = begin
+    cb.values = expand_mvars(cb.values)
+end
+
+@inline mvar_occupied(cb::CombinedConstraints, mx) = any(!=(0), @view(cb.values[:,mx]))
+@inline mvar_occupied(cbv::AbstractMatrix, mx) = any(!=(0), @view(cbv[:,mx]))
+@inline mvar_occupied(c::Constraint, mx) = any(sx -> mvar_occupied(@view(c.sets[sx, :, :]), mx), axes(c.sets, 1))
+@inline avar_occupied(cb::CombinedConstraints, ax) = any(!=(0), @view(cb.values[ax,:]))
+@inline avar_constant(cb::CombinedConstraints, ax) = all(==(0), @view(cb.values[ax,2:end]))
+@inline avar_nzconstant(cb::CombinedConstraints, ax) = cb.values[ax,1] != 0 && avar_constant(cb, ax)
+@inline avar_constant(ar::AbstractArray) = all(==(0), @view(ar[2:end]))
+@inline avar_constant(c::Constraint, sx, ax) = all(==(0), @view(c.sets[sx,ax,2:end]))
+@inline avar_count(cb::CombinedConstraints) = count(ax -> avar_occupied(cb, ax), axes(cb.values, 1))
+@inline mvar_count(cb::CombinedConstraints) = count(mx -> mvar_occupied(cb, mx), 2:size(cb.values, 2))+1
+@inline mvar_count(cbv::AbstractMatrix) = count(mx -> mvar_occupied(cbv, mx), 2:size(cbv, 2))+1
+@inline Base.isempty(c::Constraint) = length(c.sets) == 0
+
+first_unused_var!(cb::CombinedConstraints) = begin
+    for mx in axes(cb.values, 2)
+        if mx == 1 continue end
+        if !mvar_occupied(cb, mx) return mx end
     end
-    funcname = symbol("mm" * string(firstAxis) * string(secondAxis))
-    return quote
-        function $(funcname)(x::AbstractArray{T,N}, y::AbstractArray{T,N})
-            @assert size(x, $(secondAxis)) == size(y, $(firstAxis))
-            @assert size(x)[1:($(firstAxis - 1))] == size(y)[1:($(firstAxis - 1))]
-            @assert size(x)[($(firstAxis + 1)):($(secondAxis - 1))] ==
-                size(y)[($(firstAxis + 1)):($(secondAxis - 1))]
-            @assert size(x)[($(secondAxis + 1)):end] == size(y)[($(secondAxis + 1)):end]
-            return dims = (
-                size(x)[1:($(secondAxis - 1))]...,
-                size(y, $(secondAxis)),
-                size(x)[($(secondAxis + 1)):N]...,
-            )
+    mx = size(cb.values, 2) + 1
+    expand_mvars!(cb)
+    return mx
+end
+first_unused_var!(cb::CombinedConstraints, constsMap::CombinedConstraints) = begin
+    for mx in axes(cb.values, 2)
+        if mx == 1 continue end
+        if !mvar_occupied(cb, mx) && !mvar_occupied(constsMap, mx) return mx end
+    end
+    mx = size(cb.values, 2) + 1
+    expand_mvars!(cb)
+    expand_mvars!(constsMap)
+    return mx
+end
+
+function replace_var!(cb::CombinedConstraints, mx, val::AbstractVector{Int32})
+    @assert size(cb.values, 2) == length(val)
+    for ax in axes(cb.values, 1)
+        if cb.values[ax, mx] == 0 
+            continue
         end
+        coef = cb.values[ax, mx]
+        cb.values[ax, mx] = 0
+        @. @view(cb.values[ax,:]) += val * coef
     end
 end
 
-function transp(x::AbstractArray{T,N}) where {T<:Number,N}
-    @assert N >= 2
-    return rand(size(x, 2), size(x, 1), size(x)[3:end]...)
-end
-
-operators = OperatorEnum(;
-    binary_operators=[.+, .*, cross, matmult], unary_operators=[transp]
-)
-@extend_operators(operators, on_type = Array{Float64,4})
-
-trees = [
-    matmult(transp(c4), cross(c1 + x1 * c2, x2 * c3)),
-    matmult(matmult(c4, x3), (c1 + x1 * c2) * x2 * c3),
-    matmult(c1, c2 + x2),
-    matmult(c3, c4 + matmult(transp(matmult(c1, x1)), matmult(c2, c5 + transp(x2)))),
-]
-
-# Suppose we have a tree with return type Array{BT, N}, where BT = underlying number type, N = maximum allowed dimensions
-# If at any point we have a lower dimension count than N, we set the size in the extra dimensions to 1
-# Now we want to obtain the shapes of each node in the tree
-
-# We traverse the tree and give each node a number
-# We make a list of all the shape variables of the nodes, labeled a₁, a₂, ...
-# When we encounter an operation, we impose a constraint on the shape variables
-# For example, the mathematical expression of the constraint for the transpose 
-#   nodes:      t2 = transpose(t1)
-#   notation:   shape(t1) == (a1,a2), shape(t2) == (a3,a4)
-#   constraint: (a1,a2,a3,a4) ∈ {(n,m,m,n) | n,m ∈ NN}
-# More examples:
-#   For the input we can impose a constraint of the type
-#     (a₂₅,a₂₆,a₂₇,a₂₈) ∈ {(3,1,1,1)}
-#   For a broadcasted sum (given by Julia Array rules)
-#     (a₂₄,a₃₂,a₂₀) ∈ {(n,n,n)} ∪ {(n,1,n)} ∪ {(n,n,1)}
-#   For a matrix multiplication:
-#     (a₄₁,a₄₂,a₁,a₂,a₃₇,a₃₈) ∈ {(n,m,n,p,p,m)}
-
-# Struct defintions
-
-mutable struct ConstraintElem
-    # if `isConstant` is set to true, the element will be a costnant of value `value`
-    # otherwise, it will be a variable in the set, with the `value` being the index of the variable
-    isConstant::Bool
-    value::UInt64
-end
-
-@inline Base.zero(::Type{ConstraintElem}) = ConstraintElem(true, 0)
-@inline function Base.zero(::Type{NTuple{M,T}}) where {M,T}
-    return ntuple(Returns(zero(T)), Val(M))
-end
-
-struct Constraint{M,C}
-    # the shape variables (aᵢ)
-    indices::NTuple{M,UInt64}
-    # Union of sets of tuples of constant/variable elements, which determine all possible allowed valuas of the shape variable tuple
-    consSets::NTuple{C,NTuple{M,ConstraintElem}}
-end
-@inline Base.zero(::Type{Constraint{M,C}}) where {M,C} =
-    Constraint{M,C}(zero(NTuple{M,Int64}), zero(NTuple{C,NTuple{M,ConstraintElem}}))
-
-@inline function Base.convert(
-    ::Type{Constraint{M2,C2}}, x::Constraint{M1,C1}
-) where {M1,M2,C1,C2}
-    return Constraint{M2,C2}(
-        ntuple(i -> i > M1 ? 0 : x.indices[i], Val(M2)),
-        ntuple(
-            i -> if i > C1
-                zero(NTuple{M2,ConstraintElem})
-            else
-                ntuple(j -> j > M1 ? zero(ConstraintElem) : x.consSets[i][j], Val(M2))
-            end,
-            C2,
-        ),
-    )
-end
-
-# Helper functions
-
-# with tuples
-@inline function removeNth(a::NTuple{N,T}, ix::UInt64)::NTuple{N,T} where {N,T}
-    return setNth(a, ix, zero(T))
-end
-@inline function setNth(a::NTuple{N,T}, ix::UInt64, val::T)::NTuple{N,T} where {N,T}
-    return ntuple(i -> i == ix ? val : a[i], Val(N))
-end
-@inline function swapNth(a::NTuple{N,T}, i1::Int64, i2::Int64)::NTuple{N,T} where {N,T}
-    return ntuple(i -> i == i1 ? a[i2] : (i == i2 ? a[i1] : a[i]), Val(N))
-end
-@inline function removeNth(a::Constraint{M,C}, ix::Int64)::Constraint{M,C} where {M,C}
-    return Constraint{M,C}(
-        removeNth(a.indices, ix),
-        map(set -> reset_max_var(removeNth(set, a_x_index)), r.consSets),
-    )
-end
-function reorder(a::NTuple{N,T})::NTuple{N,T} where {N,T}
-    final = a
-    j = 1
-    for i in 1:N
-        (final[i] == zero(T)) && continue
-        final = swapNth(final, i, j)
-        j += 1
-    end
-    return final
-end
-
-# with ConstraintElem
-@inline Base.:(==)(a::ConstraintElem, b::ConstraintElem) =
-    a.isConstant == b.isConstant && a.value == b.value
-
-# with type-stable Constraint
-@inline effective_M(a::Constraint{M,C}) where {M,C} = count(!=(0), a.indices)
-@inline is_nonempty_set(set) = any(ce -> ce.value != 0, set)
-@inline effective_C(a::Constraint{M,C}) where {M,C} = count(is_nonempty_set, a.consSets)
-
-@inline same_indices(a::Constraint{M,C}, b::Constraint{M,C}) where {M,C} =
-    effective_M(a) == effective_M(b) && all(x -> x in a.indices, b.indices)
-
-function reset_max_var(r::NTuple{M,ConstraintElem})::NTuple{M,ConstraintElem} where {M}
-    covered = count(x -> x.isConstant, r)
-    i = 1
-    while covered < M
-        mins = minimum(map(x -> (x.isConstant || x.value < i) ? M + 5 : x.value, r))
-        new_count = count(x -> !x.isConstant && x.value == mins, r)
-        covered += new_count
-        if mins != i
-            r = map(
-                x -> (x.isConstant || x.value != mins) ? x : ConstraintElem(false, i), r
-            )
+function renormalize_mvars!(cbv::AbstractMatrix{Int32})
+    nmx = 1
+    omx = 1
+    while omx < size(cbv, 2)
+        omx+=1
+        if mvar_occupied(cbv, omx)
+            nmx += 1
+            if nmx == omx continue end
+            @. @view(cbv[:,nmx]) = @view(cbv[:, omx])
         end
-        i += 1
-    end
-    return r
+    end 
+    @. @view(cbv[:,(nmx+1):end]) = 0
+    return nmx
 end
 
-function resolve_set_value(
-    r::Constraint{M,C}, a_x::UInt64, value::UInt64
-)::Constraint{M,C} where {M,C}
-    !(a_x in r.indices) && return r
-    a_x_index = UInt64(findfirst(x -> x == a_x, r.indices))
-    is_single = count(x -> x != 0, r.indices) == 1
-    if is_single
-        has_the_value = any(
-            set -> set[a_x_index].isConstant && set[a_x_index].value == value, r.consSets
-        )
-        if !has_the_value
-            return convert(Constraint{M,C}, Constraint{1,0}((a_x,), Tuple{}()))
+function renormalize_mvars!(cb::CombinedConstraints)
+    nmx = 1
+    omx = 1
+    while omx < size(cb.values, 2)
+        omx+=1
+        if mvar_occupied(cb.values, omx)
+            nmx += 1
+            if nmx == omx continue end
+            @. @view(cb.values[:,nmx]) = @view(cb.values[:, omx])
         end
+    end 
+    cb.values = copy(@view(cb.values[:, 1:nmx]))
+    return nmx
+end
+
+function renormalize_mvars!(c::Constraint)
+    tmx = 0
+    for sx in axes(c.sets, 1)
+        nmx = renormalize_mvars!(@view(c.sets[sx,:,:]))
+        tmx = max(tmx, nmx)
     end
-    return Constraint(
-        removeNth(r.indices, a_x_index),
-        map(
-            set -> if set[a_x_index].isConstant
-                set[a_x_index] == 0 ? set : removeNth(set, a_x_index)
-            else
-                varval = set[a_x_index].value
-                reset_max_var(
-                    removeNth(
-                        map(ce -> if !ce.isConstant && ce.value == varval
-                            ConstraintElem(true, value)
-                        else
-                            ce
-                        end, set),
-                        a_x_index,
-                    ),
-                )
-            end,
-            map(
-                set -> if (set[a_x_index].isConstant && set[a_x_index].value != value)
-                    zero(typeof(set))
-                else
-                    set
-                end,
-                r.consSets,
-            ),
-        ),
-    )
+    c.sets = copy(@view(c.sets[:,:,1:tmx]))
+    return tmx
 end
 
-# is A a subset of B ?
-function Base.issubset(
-    a::NTuple{M,ConstraintElem}, b::NTuple{M,ConstraintElem}
-)::Bool where {M}
-    constsMap = zero(NTuple{M,ConstraintElem})
-    for i in eachindex(a)
-        if b[i].isConstant
-            if (a[i].isConstant && b[i].value != a[i].value) || !a[i].isConstant
-                return false
-            end
-        else
-            if constsMap[b[i].value].value == 0
-                # if we don't know the value of 
-                constsMap = setNth(constsMap, b[i].value, a[i])
-            elseif !(constsMap[b[i].value] == a[i])
-                return false
-            end
-        end
-    end
-    return true
+
+# ----------------------
+# ALGORITHM IMPLEMENTATION
+# ----------------------
+
+function solve_dioph(c::Constraint, cb::CombinedConstraints, constsMap::CombinedConstraints, axc::Integer)
+    error("solve_dioph not yet implemented")
+    return 1000, 1
 end
 
-function reorder(a::Constraint{M,C}) where {M,C}
-    return Constraint{M,C}(reorder(a.indices), reorder(map(reorder, a.consSets)))
-end
+function outsubst(c::Constraint, cb::CombinedConstraints)
+    Ac = avars_size(c)
+    Mc = mvars_size(c)
+    Mcb = mvars_size(cb)
+    constsMap = CombinedConstraints(Mc, Mcb)
+    # the avars of constsMap are mvars in c
+    #   with the first one being a temporary array
+    # the mvars of constsMap are mvars in cb
 
-function intersection(a::Constraint{M,C}, b::Constraint{M,C})::Constraint{M,C} where {M,C}
-    # a and b must have the same indices
-    a = reorder(a)
-    b = reorder(b)
-    effM = effective_M(a)
-    effCa = effective_C(a)
-    effCb = effective_C(b)
-    newBSets = map(
-        sb -> begin
-            sb == zero(typeof(sb)) && return sb
-            if any(sa -> issubset(sb, sa) && !(sb == sa), a.consSets)
-                sb
-            else
-                zero(typeof(sb))
-            end
-        end,
-        b.consSets,
-    )
-    newASets = map(
-        sa -> begin
-            sa == zero(typeof(sa)) && return sa
-            any(sb -> issubset(sa, sb), b.consSets) ? sa : zero(typeof(sa))
-        end,
-        a.consSets,
-    )
-    c2 = reorder(Constraint{M,2 * C}(a.indices, (newASets..., newBSets...)))
-    @assert effective_C(c2) <= C
-    return convert(Constraint{M,C}, c2)
-end
-
-# Printing constraints
-using Unicode
-function to_subscript_str(n)
-    return map(
-        k -> Unicode.julia_chartransform(
-            Unicode.julia_chartransform('₁') + Int(k) - Int('1')
-        ),
-        string(n),
-    )
-end
-function parensd(va, func, io)
-    if length(va) == 1
-        print(io, func(va[1]))
-    else
-        print(io, "(")
-        for i in eachindex(va)
-            print(io, func(va[i]))
-            if i != length(va)
-                print(io, ",")
-            end
-        end
-        print(io, ")")
-    end
-end
-
-function Base.show(io::IO, ce::ConstraintElem)
-    if ce.value == 0
-        print(io, "_")
-    elseif ce.isConstant
-        print(io, ce.value)
-    else
-        print(io, "_nmpqrtuvxyzbcdefghijka"[ce.value + 1])
-    end
-end
-
-function Base.show(io::IO, c::Constraint)
-    parensd(filter(x -> x != 0, c.indices), i -> "a" * to_subscript_str(i), io)
-    print(io, " ∈ ")
-    printed = false
-    for i in eachindex(c.consSets)
-        c.consSets[i] == zero(eltype(c.consSets)) && continue
-        if printed
-            print(io, " ∪ ")
-        end
-        print(io, "{")
-        parensd(filter(ce -> ce.value != 0, c.consSets[i]), ce -> ce, io)
-        print(io, "}")
-        printed = true
-    end
-    if !printed
-        print(io, "∅")
-    end
-end
-
-function print_constraints(cs::Vector{Constraint{C,M}}) where {C,M}
-    println("------- CONSTRAINTS --------")
-    for i in eachindex(cs)
-        count(!=(0), cs[i].indices) == 0 && continue
-        println("R", i, ": ", cs[i])
-    end
-    return println()
-end
-
-function print_tree(nodes::AbstractVector{TensorNode{T,N}}) where {T,N}
-    println("------- FLATTENED TREE --------")
-    for i in eachindex(nodes)
-        parensd((i - 1) * N .+ collect(1:N), ix -> "a" * to_subscript_str(ix), stdout)
-        println(" -> ", nodes[i])
-    end
-    return println()
-end
-
-function print_final(
-    final::AbstractVector{ConstraintElem}, nodes::AbstractVector{TensorNode{T,N}}
-) where {N,T}
-    println("------- SOLVED SO FAR --------")
-    for i in eachindex(nodes)
-        println(nodes[i], " -> ", ntuple(j -> final[(i - 1) * N + j], Val(N)))
-    end
-    return println()
-end
-
-function flatten_tree!(
-    v::Vector{NodeT}, tree::NodeT
-) where {NodeT <: AbstractNode}
-    if tree.degree == 0
-        push!(v, tree)
-    elseif tree.degree == 1
-        flatten_tree!(v, tree.l)
-        push!(v, tree)
-    elseif tree.degree == 2
-        flatten_tree!(v, tree.l)
-        flatten_tree!(v, tree.r)
-        push!(v, tree)
-    end
-end
-
-MAX_M::Int64 = 1
-MAX_C::Int64 = 1
-
-# A push constraints macro to make constraints a lot more readable
-macro push_constraint(cs, indices, sets...)
-    (length(sets) == 0 || indices.head != :tuple) && throw("Wrong format of indices")
-    N = length(indices.args)
-    C = length(sets)
-    global MAX_M
-    MAX_M = max(N, MAX_M)
-    global MAX_C
-    MAX_C = max(C, MAX_C)
-
-    for i in eachindex(sets)
-        (
-            sets[i].head != :tuple ||
-            length(sets[i].args) != N ||
-            !all(x -> typeof(x) == Int64 ? x >= 1 : typeof(x) == Symbol, sets[i].args)
-        ) && throw("Wrong format of $(i)th set")
-        d = Dict{Symbol,Int64}()
-        for j in eachindex(sets[i].args)
-            if typeof(sets[i].args[j]) == Int64
-                sets[i].args[j] = ConstraintElem(true, sets[i].args[j])
-            elseif haskey(d, sets[i].args[j])
-                sets[i].args[j] = ConstraintElem(false, d[sets[i].args[j]])
-            else
-                d[sets[i].args[j]] = length(d) + 1
-                sets[i].args[j] = ConstraintElem(false, d[sets[i].args[j]])
-            end
-        end
-    end
-
-    return quote
-        push!(
-            $(esc(cs)),
-            convert(
-                eltype($(esc(cs))),
-                Constraint{$(N),$(C)}(
-                    $(esc(indices)),
-                    $(NTuple{C,NTuple{N,ConstraintElem}}(
-                        map(set -> NTuple{N,ConstraintElem}(set.args), sets)
-                    )),
-                ),
-            ),
-        )
-    end
-end
-
-function push_constraint_costants(
-    cs::AbstractVector{Constraint{M,C}}, start_index, constants::NTuple{N,Int64}
-) where {N,M,C}
-    return push!(
-        cs,
-        convert(
-            Constraint{M,C},
-            Constraint{N,1}(
-                ntuple(x -> (start_index - 1) * N + x, Val(N)),
-                (map(x -> ConstraintElem(true, x), constants),),
-            ),
-        ),
-    )
-end
-
-# Function that appends the constraints determined by the operator f onto the constraint vector cs
-# N - max number of tensor dimensions
-# indices - indices of the dimension variables involved in the operations
-#   indices[1]+1, indices[1]+2, ..., indices[1]+N represent the dimensions of the output node
-#   indices[2]+1, indices[2]+2, ..., indices[2]+N represent the dimensions of the left node
-#   indices[3]+1, indices[3]+2, ..., indices[3]+N represent the dimensions of the right node (if applicable)
-# Unary operators have 2-tuple, while binary ops have a 3-tuple as argument into the function
-function append_constraints!(
-    f::F, cs::Vector{Constraint{M,C}}, N::Int64, indices::Tuple{Int64,Int64}
-) where {F,M,C}
-    return error(
-        "Unimplemented append_constraints! function for unary operator $(f)"
-    )
-end
-function append_constraints!(
-    f::F, cs::Vector{Constraint{M,C}}, N::Int64, indices::Tuple{Int64,Int64,Int64}
-) where {F,M,C}
-    return error(
-        "Unimplemented append_constraints! function for binary operator $(f)"
-    )
-end
-
-# Implementations of append_constraints!
-
-append_constraints_broadcasting(cs::Vector{Constraint{M,C}}, (p, l, r), ::Val{N}) where {M,C,N} = begin
-    for i in 1:N
-        @push_constraint(cs, (p + i, l + i, r + i), (n, n, n), (n, 1, n), (n, n, 1))
-    end
-end
-
-append_constraints_binary_all_equal(cs::Vector{Constraint{M,C}}, (p,l,r), ::Val{N}) where {N,M,C} = begin
-    for i in 1:N
-        @push_constraint(cs, (p + i, l + i, r + i), (n, n, n))
-    end
-end
-
-append_constraints_unary_all_equal(cs::Vector{Constraint{M,C}}, (p,l), ::Val{N}) where {N,M,C} = begin
-    for i in 1:N
-        @push_constraint(cs, (p + i, l + i), (n, n))
-    end
-end
-
-function append_constraints!(
-    ::typeof(.+), cs2::Vector{Constraint{M,C}}, N::Int64, indices::Tuple{Int64,Int64,Int64}
-) where {M,C}
-    p, l, r = indices
-    for i in 1:N
-        @push_constraint(cs2, (p + i, l + i, r + i), (n, n, n), (n, 1, n), (n, n, 1))
-    end
-end
-
-function append_constraints!(
-    ::typeof(.*), cs1::Vector{Constraint{M,C}}, N::Int64, indices::Tuple{Int64,Int64,Int64}
-) where {M,C}
-    p, l, r = indices
-    for i in 1:N
-        @push_constraint(cs1, (p + i, l + i, r + i), (n, n, n), (n, 1, n), (n, n, 1))
-    end
-end
-
-function append_constraints!(
-    ::typeof(transp), cs::Vector{Constraint{M,C}}, N::Int64, indices::Tuple{Int64,Int64}
-) where {M,C}
-    p, c = indices
-    @push_constraint(cs, (p + 1, p + 2, c + 1, c + 2), (n, m, m, n))
-    for i in 3:N
-        @push_constraint(cs, (p + i, c + i), (n, n))
-    end
-end
-
-function append_constraints!(
-    ::typeof(matmult),
-    cs::Vector{Constraint{M,C}},
-    N::Int64,
-    indices::Tuple{Int64,Int64,Int64},
-) where {M,C}
-    p, l, r = indices
-    @push_constraint(cs, (p + 1, p + 2, l + 1, l + 2, r + 1, r + 2), (n, m, n, p, p, m))
-    for i in 3:N
-        @push_constraint(cs, (p + i, l + i, r + i), (n, n, n), (n, 1, n), (n, n, 1))
-    end
-end
-
-function append_constraints!(
-    ::typeof(cross),
-    cs::Vector{Constraint{M,C}},
-    N::Int64,
-    indices::Tuple{Int64,Int64,Int64},
-) where {M,C}
-    p, l, r = indices
-    @push_constraint(cs, (p + 1, l + 1, r + 1), (3, 3, 3))
-    for i in 2:N
-        @push_constraint(cs, (p + i, l + i, r + i), (n, n, n), (n, 1, n), (n, n, 1))
-    end
-end
-
-# function inside_substitution(
-#     c::Constraint{M,C},
-#     cs::Vector{Constraint{M,C}},
-#     nodes::Vector{TensorNode{T,N}},
-# )::Bool where {M,C,AT,N}
-#     effM, effC = effective_M(c), effective_C(c)
-#     !(effM == 1 && effC == 1) && return false
-#     a_x_index = findfirst(!=(0), c.indices)
-#     set_index = findfirst(s -> s[a_x_index].value != 0, c.consSets)
-#     !(c.consSets[set_index][a_x_index].isConstant) && return false
-#     @show a_x_index
-#     @show set_index
-#     a_x = c.indices[a_x_index]
-#     value = c.consSets[set_index][a_x_index].value
-#     node = nodes[div(a_x - 1, N) + 1]
-#     #=D=# # println("Applying substitution ", c)    
-#     if solved[node][mod(a_x - 1, N) + 1] != 0
-#         #=D=# # println(map(node -> solved[node], nodes))        
-#         error("Already set " * string(solved[node]))
-#     end
-#     map!(cst -> resolve_set_value(cst, a_x, value), cs, cs)
-#     #=D=# # print_constraints(cs)    
-#     solved[node] = setNth(solved[node], UInt64(mod(a_x - 1, N) + 1), Int64(value))
-#     return true
-# end
-
-function splitting(
-    c::Constraint{M,C}, cs::Vector{Constraint{M,C}}, ci::Int64
-)::Bool where {M,C}
-    effM, effC = effective_M(c), effective_C(c)
-    (effM == 0 || effC == 0 || effM == 1) && return false
-    first = findfirst(is_nonempty_set, c.consSets)
-    mask::NTuple{M,UInt64} = map(ce -> ce.isConstant ? ce.value : 0, c.consSets[first])
-    for si in (first + 1):C
-        for cei in 1:M
-            !any(ce -> ce.value != 0, c.consSets[si]) && continue
-            if (
-                !c.consSets[si][cei].isConstant || mask[cei] != c.consSets[si][cei].value
-            ) && mask[cei] != 0
-                mask = setNth(mask, UInt64(cei), UInt64(0))
-            end
-        end
-    end
-    sum(mask) == 0 && return false
-    #=D=# # println("Applying splitting for ", c)    
-    for ix in 1:M
-        if mask[ix] != 0
-            push!(
-                cs,
-                convert(
-                    Constraint{M,C},
-                    Constraint{1,1}((c.indices[ix],), ((ConstraintElem(true, mask[ix]),),)),
-                ),
-            )
-        end
-    end
-    cs[ci] = Constraint{M,C}(
-        ntuple(i -> mask[i] != 0 ? 0 : c.indices[i], Val(M)),
-        map(
-            set -> ntuple(i -> mask[i] != 0 ? zero(ConstraintElem) : set[i], Val(M)),
-            c.consSets,
-        ),
-    )
-    #=D=# # print_constraints(cs)    
-    return true
-end
-
-function simplification(
-    c::Constraint{M,C}, cs::Vector{Constraint{M,C}}, ci::Int64
-)::Bool where {M,C}
-    effM, effC = effective_M(c), effective_C(c)
-    (effM != 1 || effC == 1 || effC == 0) && return false
-    mask = ntuple(
-        si -> begin
-            for pi in eachindex(c.consSets)
-                pi == si && continue
-                # if issubset(c.consSets[si], c.consSets[pi]) && (pi < si ? true : !(c.consSets[si] == c.consSets[pi]))
-                if (pi < si ? false : (c.consSets[si] == c.consSets[pi]))
-                    return 1 # delete
+    for axc in 1:Ac
+        avc = c.tuple[axc]
+        axcb = avc
+        if !avar_occupied(cb, axcb)
+            # we haven't encountered this a-var in the combined constants so far
+            cb.values[avc, 1] = c.sets[1, axc, 1]
+            for mxc in 2:Mc
+                if c.sets[1, axc, mxc] == 0 continue end
+                if !avar_occupied(constsMap, mxc)
+                    # if we don't know the value of a m-var in c, we say it is a new m-var in cb
+                    mxcb = first_unused_var!(cb, constsMap)
+                    constsMap.values[mxc, mxcb] = 1
                 end
+                # println(@view(constsMap.values[mxc, :]) .* c.sets[1, axc, mxc])
+                @. @view(cb.values[axcb, :]) += @view(constsMap.values[mxc, :]) * c.sets[1, axc, mxc]
             end
-            return 0 # keep
-        end, Val(C)
-    )
-    sum(mask) == 0 && return false
-    #=D=# # println("Applying simplification on ", cs[ci])    
-    cs[ci] = Constraint{M,C}(
-        c.indices,
-        ntuple(i -> mask[i] == 0 ? c.consSets[i] : zero(eltype(c.consSets)), Val(C)),
-    )
-    #=D=# # print_constraints(cs)    
-    return true
-end
+            continue
+        end
+        # we have encountered this a-var in the combined constants already
 
-function outside_substitution(
-    final::AbstractVector{ConstraintElem}, constraint::Constraint{M,C}
-) where {M,C}
-    next_v = maximum(ce -> ce.isConstant ? 0 : ce.value, final) + 1
-    set_index = findfirst(set -> any(ce -> ce.value != 0, set), constraint.consSets)
-    constsMap = ntuple(Returns(zero(ConstraintElem)), Val(M))
-    for i in 1:M
-        constraint.indices[i] == 0 && continue
-        a_x = constraint.indices[i]
-        is_const = constraint.consSets[set_index][i].isConstant
-        value = constraint.consSets[set_index][i].value
-        if final[a_x].value == 0
-            if is_const
-                final[a_x] = ConstraintElem(true, value)
-            else
-                if constsMap[value].value == 0
-                    final[a_x] = ConstraintElem(false, next_v)
-                    constsMap = setNth(constsMap, value, final[a_x])
-                    next_v += 1
-                else
-                    final[a_x] = constsMap[value]
-                end
-            end
-        elseif final[a_x].isConstant
-            if is_const
-                value == final[a_x].value ? continue : return a_x, value
-            else
-                if constsMap[value].value == 0
-                    constsMap = setNth(constsMap, value, final[a_x])
-                elseif constsMap[value].isConstant
-                    if constsMap[value].value == final[a_x].value
-                        continue
-                    else
-                        return a_x, constsMap[value].value
-                    end
-                else
-                    varval = constsMap[value].value
-                    map!(
-                        ce -> (!ce.isConstant && ce.value == varval) ? final[a_x] : ce,
-                        final,
-                        final,
-                    )
-                    constsMap = setNth(constsMap, value, final[a_x])
-                end
-            end
-        else
-            if is_const
-                varval = final[a_x].value
-                map!(
-                    ce -> if (!ce.isConstant && ce.value == varval)
-                        ConstraintElem(true, value)
-                    else
-                        ce
-                    end,
-                    final,
-                    final,
-                )
-            else
-                if constsMap[value].value == 0
-                    constsMap = setNth(constsMap, value, final[a_x])
-                elseif constsMap[value].isConstant
-                    varval = final[a_x].value
-                    map!(
-                        ce -> if (!ce.isConstant && ce.value == varval)
-                            ConstraintElem(true, constsMap[value].value)
-                        else
-                            ce
-                        end,
-                        final,
-                        final,
-                    )
-                else
-                    if constsMap[value].value == final[a_x].value
-                        continue
-                    else
-                        varval = final[a_x].value
-                        map!(
-                            ce -> if (!ce.isConstant && ce.value == varval)
-                                constsMap[value]
-                            else
-                                ce
-                            end,
-                            final,
-                            final,
-                        )
-                    end
-                end
+        # we require all m-vars in c to have a corresponding value in cb
+        for mxc in 2:Mc
+            if c.sets[1, axc, mxc] == 0 continue end
+            if !avar_occupied(constsMap, mxc)
+                # if we don't know the value of a m-var in c, we say it is a new m-var in cb
+                mxcb = first_unused_var!(cb, constsMap)
+                constsMap.values[mxc, mxcb] = 1
             end
         end
+
+        @. @view(constsMap.values[1, :]) = -@view(cb.values[axcb, :])
+        # the constraint is (the a-var in c) = (the a-var in cb)
+        constsMap.values[1, 1] += c.sets[1, axc, 1]
+        for mxc in 2:Mc
+            if c.sets[1, axc, mxc] == 0 continue end
+            @. @view(constsMap.values[1, :]) += @view(constsMap.values[mxc, :])
+        end
+
+        # now the constraint is (the a-var in cb) = 0
+        # it is a linear diophantine equation
+        # print("The constraint on cb is: ")
+        # print_mvars(stdout, constsMap.values[1,:])
+        # print(" = 0\n")
+
+        if avar_constant(constsMap, 1)
+            if constsMap.values[1, 1] == 0
+                continue
+            else
+                return 1, axcb
+            end
+        end
+
+        if !any(x -> abs(x) == 1, @view(constsMap.values[1, 2:end]))
+            code, axerr = solve_dioph(c, cb, constsMap, axc)
+            if code != 0
+                return code, axerr
+            end
+            continue
+        end
+
+        # if there are any variables with coefficients equal to 1, it is pretty easy to solve
+        # there is an extraneous variable wich is equal to the linear combination of thee other variables
+        mxcb = findfirst(x -> abs(x) == 1, @view(constsMap.values[1, 2:end])) + 1
+        coef = constsMap.values[1, mxcb]
+        constsMap.values[1, mxcb] = 0
+        if coef == 1
+            @. @view(constsMap.values[1, :]) = - @view(constsMap.values[1, :])
+        end
+        # print("the result is: ")
+        # print_mvars(stdout, begin x = zeros(Int32, mvars_size(cb)); x[mxcb] = 1; x end)
+        # print(" = ")
+        # print_mvars(stdout, @view(constsMap.values[1, :]))
+        # print("\n")
+        # println(cb)
+        replace_var!(cb, mxcb, @view(constsMap.values[1, :]))
+        replace_var!(constsMap, mxcb, @view(constsMap.values[1, :]))
+        # println(cb)
     end
+
     return 0, 0
 end
 
-"""
-    inference_iteration(cs::AbstractVector{Constraint{M,C}}, final::AbstractVector{ConstraintElem))::Bool where {M,C}
-
-Does one iteration of the shape inference process, defined as:
-
-    loop until no changes:
-        substitute single choice constraints into the final array
-        substitute constants from final array into the constraints vector
-        split independent terms in constraints
-        simplify constraints to simplest form
-    unify constraints with the same input condition
-
-"""
-function inference_iteration(
-    cs::AbstractVector{Constraint{M,C}},
-    final::AbstractVector{ConstraintElem},
-    nodes::AbstractVector{TensorNode{AT}},
-) where {M,C,N,BT,AT<:AbstractArray{BT,N}}
-    should_continue = true
-    iterations = 0
-    while should_continue
-        should_continue = false
-        iterations += 1
-
-        # Outisde substitution
-        for ci in eachindex(cs)
-            effective_C(cs[ci]) != 1 && continue
-            should_continue = true
-            #=D=# # println("Applying ", cs[ci])            
-            a_x, nv = outside_substitution(final, cs[ci])
-            if a_x != 0
-                dimi = mod(a_x - 1, N) + 1
-                ni = div(a_x - 1, N) + 1
-                error(
-                    "Node $(nodes[ni]) in dimension $(dimi) cannot have sizes $(final[a_x]) and $(nv)",
-                )
-            end
-            cs[ci] = zero(eltype(cs))
-            #=D=# # println(final)            
-            #=D=# # print_final(final, nodes)            
-        end
-
-        # Inside Substitution
-        for ai in eachindex(final)
-            (final[ai].value == 0 || !final[ai].isConstant) && continue
-            map!(c -> resolve_set_value(c, UInt64(ai), final[ai].value), cs, cs)
-        end
-
-        # Splitting
-        for ci in eachindex(cs)
-            should_continue |= splitting(cs[ci], cs, ci)
-        end
-
-        # Simplification
-        for ci in eachindex(cs)
-            should_continue |= simplification(cs[ci], cs, ci)
-        end
-
-        # Remove illegal or redundant constraints
-        filter!(c -> effective_M(c) != 0, cs)
-        if count(c -> effective_C(c) == 0, cs) != 0
-            #=D=# # print_constraints(cs)            
-            i = findfirst(c -> effective_C(c) == 0, cs)
-            a_x_index = findfirst(!=(0), cs[i].indices)
-            a_x = cs[i].indices[a_x_index]
-            #=D=# # print_final(final, nodes)            
-            return error(
-                "Could not find a potential size for node $(nodes[div(a_x-1, N)+1]) in dimension $(mod(a_x-1,N)+1)",
-            )
+function should_innersubst(c::Constraint, cb::CombinedConstraints)
+    Ac = avars_size(c)
+    for axc in 1:Ac
+        if avar_nzconstant(cb, c.tuple[axc])
+            return true 
         end
     end
-
-    # Union
-    for ci in eachindex(cs)
-        for cj in 1:(ci - 1)
-            effective_M(cs[ci]) == 0 && continue
-            !same_indices(cs[ci], cs[cj]) && continue
-            should_continue = true
-            #=D=# # println("Applying union on ", cs[cj], " and ", cs[ci])            
-            cs[cj] = intersection(cs[ci], cs[cj])
-            cs[ci] = zero(Constraint{M,C})
-            #=D=# # print_constraints(cs)            
-        end
-    end
-
-    filter!(c -> effective_M(c) != 0, cs)
-    if count(c -> effective_C(c) == 0, cs) != 0
-        index = findfirst(c -> effective_C(c) == 0, cs)
-        a_x = cs[index].indices[findfirst(!=(0), cs[index].indices)]
-        return error(
-            "Could not find a potential size for node $(nodes[div(a_x-1, N)+1]) in dimension $(mod(a_x-1,N)+1)",
-        )
-    end
-
-    return !(iterations == 1)
+    return false
 end
 
-"""
-    _shape_inference(nodes::Vector{TensorNode{T,N}}, operators::O, ::Val{M}, ::Val{C}, featureSizes::NTuple{K,NTuple{N,Int64}}) where {M,C,BT,N,K,O<:OperatorEnum,AT<:AbstractArray{BT,N}}
+function innersubst(c::Constraint, cb::CombinedConstraints)
+    Ac = avars_size(c)
+    Mc = mvars_size(c)
+    S = sets_size(c)
+    # this is an outsubst problem
+    virtual_cb = CombinedConstraints(Ac, Mc)
+    virtual_tuple = filter((axc) -> avar_nzconstant(cb, c.tuple[axc]), eachindex(c.tuple))
+    virtual_c = Constraint(
+        virtual_tuple,
+        reshape(map(axc -> cb.values[c.tuple[axc], 1], virtual_tuple), (1, length(virtual_tuple), 1))
+    )
+    # println(virtual_c)
+    errax = 0
+    errcode = 0
 
-Internal implementation of shape_inference. Its pseudocode looks like this:
-
-    traverse the tree:
-        for features, append their shape as constraints
-        for non-terminals, append the constraints of their operator
-    loop until no constraints:
-        loop until no changes:
-            do a iteration
-            if a constraint has multiple branches, choose a random one
-        if the final answer still contains variables, choose randomly
-    
-"""
-function _shape_inference(
-    nodes::Vector{TensorNode{T,N}},
-    operators::TensorOperatorEnum,
-    ::Val{M},
-    ::Val{C},
-    featureSizes::NTuple{K,NTuple{N,Int64}},
-) where {M,C,K,T,N}
-
-    final = fill(zero(ConstraintElem), N * length(nodes))
-
-    # Adding all the constraints
-    cs = Vector{Constraint{M,C}}()
-    sizehint!(cs, length(nodes) * N)
-    for i in eachindex(nodes)
-        if i == length(nodes)
-            push_constraint_costants(cs, i, featureSizes[end])
+    new_sets_u = Array{Int32, 3}(undef, S, Ac, Mc)
+    newS = 0
+    newM = 1
+    newA = Ac - length(virtual_tuple)
+    for sx in 1:S
+        @. virtual_cb.values = @view(c.sets[sx, :, :])
+        # println("WE HAVE: ", virtual_cb)
+        # println("WITH ", virtual_c)
+        errcode, errax = outsubst(virtual_c, virtual_cb)
+        if errcode != 0
+            continue
         end
-        if nodes[i].degree == 0 && !nodes[i].constant
-            push_constraint_costants(cs, i, featureSizes[nodes[i].feature])
-        elseif nodes[i].degree == 1
-            append_constraints!(
-                operators.unaops[nodes[i].op],
-                cs,
-                N,
-                ((i - 1) * N, (dict[nodes[i].l] - 1) * N),
-            )
-        elseif nodes[i].degree == 2
-            append_constraints!(
-                operators.binops[nodes[i].op],
-                cs,
-                N,
-                ((i - 1) * N, (dict[nodes[i].l] - 1) * N, (dict[nodes[i].r] - 1) * N),
-            )
-        end
+        newS += 1
+        @. @view(new_sets_u[newS, :, :]) = virtual_cb.values
+        Ms = renormalize_mvars!(@view(c.sets[newS, :, :]))
+        newM = max(newM, Ms)
+    end
+    if newS == 0
+        # we have a special case here, when there is a constraint that completely contradicts what we have
+        return 100, c.tuple[errax] 
     end
 
-    #=D=# # print_constraints(cs)    
+    # we now shrink the constraint
+    new_sets = Array{Int32, 3}(undef, newS, newA, newM)
+    new_tuple = Vector{Int32}(undef, newA)
+    axxv = 1
+    for axc in eachindex(c.tuple)
+        if axxv <= length(virtual_tuple) && axc == virtual_tuple[axxv]
+            axxv += 1
+        else
+            new_tuple[axc-axxv+1] = axc
+        end
+    end
+    for sx in 1:newS, ax in 1:newA
+        @. @view(new_sets[sx, ax, :]) = @view(new_sets_u[sx, new_tuple[ax], 1:newM])
+    end
+    map!(axx -> c.tuple[axx], new_tuple, new_tuple)
+    c.tuple = new_tuple
+    c.sets = new_sets
+    # println("NEW VALUE: ", c)
+    return 0, 0
+end
 
-    while length(cs) != 0
-        should_continue = true
-        while should_continue
-            should_continue = false
+# 0 if they are not subsets of each other
+# 1 if s1 is a subset of s2
+# 2 if s2 is a subset of s1
+# 3 if they are equivalent
+function subset_comparison(c::Constraint, s1::Integer, s2::Integer)
+    # s1 is a subset of s2 if we can find variables such that the equation is compatible
+    # this can be done using outsubst (we say we have a set that is the combined constraints and a set that is )
+    Mb = mvars_size(c)
+    Ab = avars_size(c)
+    virtual_cb = CombinedConstraints(Ab, Mb)
+    virtual_cb.values .= @view(c.sets[s1, :, :])
+    virtual_c = Constraint(collect(1:Ab), c.sets[s2:s2,:,:])
+    initial_mvars_1 = mvar_count(@view(c.sets[s1,:,:]))
+    initial_mvars_2 = mvar_count(@view(c.sets[s2,:,:]))
+    ercode, _ = outsubst(virtual_c, virtual_cb)
+    if ercode != 0 # not compatible
+        return 0
+    elseif initial_mvars_1 == initial_mvars_2 
+        # the dimensionality is the same, and if they are compatible, it means they are equivalent
+        return 3
+    elseif initial_mvars_1 < initial_mvars_2
+        return 1
+    else
+        return 2
+    end
+    
+end
 
-            should_continue |= inference_iteration(cs, final, nodes)
-            #=D=# # println(final)            
-            #=D=# # print_constraints(cs)            
-
-            # Choice
-            independents = 0
-            for ci in eachindex(cs)
-                (effective_M(cs[ci]) == 0) && continue
-                dependent = any(
-                    cj -> if cj == ci
-                        false
-                    else
-                        any(a_x -> a_x == 0 ? false : (a_x in cs[cj].indices), cs[ci].indices)
-                    end,
-                    eachindex(cs),
-                )
-                dependent && continue
-                independents += 1
-                #=D=# # println("Chose ", cs[ci])                
-                #=D=# # print_constraints(cs)                
-                effC = effective_C(cs[ci])
-                C_index = trunc(Int64, rand() * effC) + 1
-                cs[ci] = reorder(cs[ci])
-                set = cs[ci].consSets[C_index]
-                a_x, nv = outside_substitution(
-                    final, convert(Constraint{M,C}, Constraint{M,1}(cs[ci].indices, (set,)))
-                )
-                if a_x != 0
-                    dimi = mod(a_x - 1, N) + 1
-                    ni = div(a_x - 1, N) + 1
-                    error(
-                        "Node $(nnodesodes[ni]) in dimension $(dimi) cannot have sizes $(final[a_x]) and $(nv)",
-                    )
-                end
-                cs[ci] = zero(Constraint{M,C})
-                should_continue = true
+function simplify(cs::AbstractVector{Constraint}, ci::Integer)
+    # simplifies constraints that have redundant sets
+    Sb = sets_size(cs[ci])
+    if Sb < 2 return 0, 0 end
+    Mb = mvars_size(cs[ci])
+    Ab = avars_size(cs[ci])
+    
+    # for every set, we check if there is a set that is a subset of the original
+    # if it is, we remove it
+    save_map = zeros(Int32, Sb)
+    save_map[1] = 1
+    save_count = 1
+    for sx in 2:Sb
+        save_flag = true
+        for j in 1:(sx-1)
+            sc = subset_comparison(cs[ci], sx, j)
+            if sc == 0 # incompatible
+                # save the set if there are only incompatibilities
+                continue
+            elseif sc == 1 || sc == 3 # sx subset of j or equivalent set
+                # don't save the set
+                # do nothing with it
+                save_flag = false
+                break  
+            elseif sc == 2 # j subset of sc
+                # replace the set with sc
+                # don't save as a new set
+                save_map[sx] = save_map[j]
+                save_map[j] = 0
+                save_flag = false
                 break
             end
+            # if they are equal we must onyl remove 1
+            #if j > sx && @view(cs[ci].sets[sx, :, :]) == @view(cs[ci].sets[j, :, :]) continue end 
+        end
 
-            if independents == 0 && length(cs) != 0
-                ci = abs(rand(Int64)) % length(cs) + 1
-                effC = effective_C(cs[ci])
-                C_index = trunc(Int64, rand() * effC) + 1
-                cs[ci] = reorder(cs[ci])
-                set = cs[ci].consSets[C_index]
-                a_x, nv = outside_substitution(
-                    final, convert(Constraint{M,C}, Constraint{M,1}(cs[ci].indices, (set,)))
-                )
-                if a_x != 0
-                    dimi = mod(a_x - 1, N) + 1
-                    ni = div(a_x - 1, N) + 1
-                    error(
-                        "Node $(nodes[ni]) in dimension $(dimi) cannot have sizes $(final[a_x]) and $(nv)",
-                    )
+        if save_flag
+            save_map[sx] = save_count+1
+            save_count += 1
+        end
+    end
+
+    new_sets = Array{Int32, 3}(undef, save_count, Ab, Mb)
+    for savex in eachindex(save_map)
+        if save_map[savex] == 0 continue end
+        @view(new_sets[save_count,:,:]) .=  @view(cs[ci].sets[save_map[savex],:,:])
+        save_count -= 1
+    end
+    cs[ci].sets = new_sets
+    renormalize_mvars!(cs[ci])
+    for sx in axes(cs[ci].sets, 1), ax in axes(cs[ci].sets, 2)
+        if avar_constant(cs[ci], sx, ax) && cs[ci].sets[sx,ax,1] < 0
+            return 33, ci
+        end
+    end
+
+    return 0, 0
+end
+
+function split_by_variables(cs::AbstractVector{Constraint}, ci::Integer)
+    Sb = sets_size(cs[ci])
+    if Sb < 2 return 0, 0 end
+    Mb = mvars_size(cs[ci])
+    Ab = avars_size(cs[ci])
+    avars_map = zeros(Int32, Ab)
+    mvars_map = zeros(Int32, Mb-1) # what constraint does the mvar fall in (0 for not yet determined)
+    ccount = 0
+    count_minus1 = 0
+    for sx in 1:Sb, ax in 1:Ab
+        if avars_map[ax] != -1 && cs[ci].sets[sx, ax, 1] != cs[ci].sets[1, ax, 1]
+            avars_map[ax] = -1 # means that we should include it in every set, except the constants one
+            count_minus1 += 1
+        end
+    end
+
+    for sx in 1:Sb
+        mvars_map .= 0
+        for ax in 1:Ab, mx in 2:Mb
+            if cs[ci].sets[sx, ax, mx] == 0
+                continue
+            end
+            mm = mvars_map[mx-1]
+            am = avars_map[ax]
+            if mm == 0 && am != 0
+                mvars_map[mx-1] = am
+            elseif mm != 0 && am == 0
+                avars_map[ax] = mm
+            elseif mm == 0 && am == 0
+                avars_map[ax] = ccount + 1
+                mvars_map[mx-1] = ccount + 1
+                ccount += 1
+            elseif mm != am && am != -1
+                toreplace = max(mm, am)
+                replacedwith = min(mm, am)
+                replace!(x -> x == toreplace ? replacedwith : (x > toreplace ? x-1 : x), mvars_map)
+                replace!(x -> x == toreplace ? replacedwith : (x > toreplace ? x-1 : x), avars_map)
+                ccount -= 1
+            elseif mm != am && am == -1
+                replace!(x -> x == mm ? -1 : (x > mm ? x-1 : x), mvars_map)
+                ccount -= 1 
+            end
+        end
+    end
+
+    # when avars_map contains -1, means that we have constants that differ depending on the case
+    # when avars_map contains 0, it means that it is a constant that is the same across the field
+    # when avars_map contains >0, it means that we can split in evenly
+    count_0 = count(==(0), avars_map)
+    if count_0 != 0
+        new_tuple = filter(x -> avars_map[x] == 0, eachindex(avars_map))
+        new_sets = Array{Int32, 3}(undef, 1, length(new_tuple), 1)
+        for nax in eachindex(new_tuple)
+            new_sets[1, nax, 1] = cs[ci].sets[1, new_tuple[nax], 1]
+        end
+        replace!(x -> cs[ci].tuple[x], new_tuple)
+        push!(cs, Constraint(
+            new_tuple, new_sets
+        ))
+    end
+    for i in 1:ccount
+        new_tuple = filter(x -> avars_map[x] == i || avars_map[x] == -1, eachindex(avars_map))
+        new_sets = Array{Int32, 3}(undef, Sb, length(new_tuple), Mb)
+        for nax in eachindex(new_tuple)
+            @view(new_sets[:, nax, :]) .= @view(cs[ci].sets[:, new_tuple[nax], :])
+        end
+        replace!(x -> cs[ci].tuple[x], new_tuple)
+        push!(cs, Constraint(
+            new_tuple, new_sets
+        ))
+        erc, erv = simplify(cs, length(cs))
+        if erc != 0
+            return erc, erv
+        end
+    end
+    if ccount == 0
+        new_tuple = filter(x -> avars_map[x] == -1, eachindex(avars_map))
+        new_sets = Array{Int32, 3}(undef, Sb, length(new_tuple), Mb)
+        for nax in eachindex(new_tuple)
+            @view(new_sets[:, nax, :]) .= @view(cs[ci].sets[:, new_tuple[nax], :])
+        end
+        replace!(x -> cs[ci].tuple[x], new_tuple)
+        push!(cs, Constraint(
+            new_tuple, new_sets
+        ))
+        erc, erv = simplify(cs, length(cs))
+        if erc != 0
+            return erc, erv
+        end
+    end
+    cs[ci] = zero(Constraint)
+
+    return 0,0
+end
+
+function split_and_simplify(cs::AbstractVector{Constraint}, ci::Integer)
+    return split_by_variables(cs, ci)
+end
+
+function shape_inference_iteration(cs::Vector{Constraint}, cb::CombinedConstraints)
+    
+    things_did = 1
+    while things_did != 0
+        things_did = 0
+        
+        # outer substitution
+        for ci in eachindex(cs)
+            if sets_size(cs[ci]) == 1
+                things_did += 1
+                # print("---------------------------\nDoing outside substitution for ")
+                # println(cs[ci])
+                code, ax = outsubst(cs[ci], cb)
+                if code != 0
+                    error("Error code $(code), conflicting a-variable $(ax)")
                 end
-                cs[ci] = zero(Constraint{M,C})
-                should_continue = true
+                cs[ci] = zero(Constraint)
+                # println(cb)
+                # println(cs)
             end
         end
 
-        # Replacing variables
-        non_ones = count(ce -> ce.isConstant && ce.value != 1, final)
-        avgdim = div(sum(ce -> ce.isConstant ? ce.value - 1 : 0, final), non_ones) + 1
-        for i in eachindex(final)
-            final[i].isConstant && continue
-            any(
-                c -> any(
-                    a_x ->
-                        a_x != 0 &&
-                            !final[a_x].isConstant &&
-                            final[a_x].value == final[i].value,
-                    c.indices,
-                ),
-                cs,
-            ) && continue
-            gendim = abs(rand(Int64)) % avgdim + div(avgdim, 2)
-            push!(
-                cs,
-                convert(
-                    Constraint{M,C},
-                    Constraint{1,1}((i,), ((ConstraintElem(true, gendim),),)),
-                ),
-            )
+        # inner substitution
+        for ci in eachindex(cs)
+            if should_innersubst(cs[ci], cb)
+                # print("---------------------------\nDoing inside substitution for ")
+                # println(cs[ci])
+                things_did += 1
+                code, ax = innersubst(cs[ci], cb)
+                if code != 0
+                    error("Error code $(code), conflicting a-variable $(ax)")
+                end
+                code, ax = split_and_simplify(cs, ci)
+                if code != 0
+                    error("Error code $(code), conflicting a-variable $(ax)")
+                end
+                # println(cb)
+                # println(cs)
+            end
         end
-    end
 
-    #=D=# # println("Finished")    
-    #=D=# # print_constraints(cs)    
-    #=D=# # println(solved)    
-
-    for ce in final
-        if !ce.isConstant || ce.value == 0
-            error("Error")
+        if things_did > 0
+            filter!(c -> !isempty(c), cs)
         end
+
     end
-    for i in eachindex(nodes)
-        solved[nodes[i]] = ntuple(j -> final[(i - 1) * N + j].value, Val(N))
-    end
-    return solved
+    renormalize_mvars!(cb)
+
 end
 
 
-# Ideally the choosing a random branch and choosing variables should be biased towards the initial values.
-#   This way, the shape inference could be considered a mutation.
-# In SR, when we create a new tree, we use the random aproach. When we mutate an old tree, we use the old size,
-#   plus possibly a mutation to increase or decrease the size in some axes.
-# The operator could also determine the size we want to pick (for example, if we have a convolution with an "image", 
-#   we choose a small kernel, etc.).
-# Mutatation on the values is not helpful (mutation all numbers in a tensor in a correlated way is probably not helpful,
-#   and mutating all numbers in a tensor in an uncorrelated way is useless, as the problem has too many variables for random
-#   change to be useful)
-# The mutation operations are therefore: the ones acting on expressions as nodes in the tree, shape inference variable change,
-#   and training (optimizing the constants)
-# There should also be a shape change that keeps the information in the previous value.
-# The loss function should also maybe contain a magnitude term of the weights (to reduce overfitting?) ?
-  
+# ----------------------
+# PRINTING
+# ----------------------
 
-"""
-    shape_inference(tree::TenosorNode{T,N}, operators::TensorOperatorEnum, featureSizes::NTuple{K,NTuple{N,Int64}}; ::Val{throw_errors}=Val(false))
-        ::Bool where {throw_errors,N,K,T}
+@inline print_delimited(io, print_element, delim, v::AbstractVector) = begin
+    printed = false
+    for i in eachindex(v)
+        if printed print(io, delim) end
+        print_element(io, v[i])
+        printed = true
+    end
+end
+@inline print_parensd(io, print_element, delim, v::AbstractVector) = begin
+    if length(v) > 1 print(io, "(") end
+    print_delimited(io, print_element, delim, v)
+    if length(v) > 1 print(io, ")") end
+end
 
-Infers the required shapes of every term in a tree, given the tree, the operation, 
-`featureSizes` (which contains the shapes of the inputs, with the shape of the output
-appended at the end). It returns a dictionary from each node in the tree to its shape, and whether
-the expression is shape-consistent.
-If `throw_errors` is turned off, it will return an empty dictionary and false if it fails.
-"""
-function shape_inference(
-    tree::TenosorNode{T,N},
-    operators::TensorOperatorEnum,
-    featureSizes::Union{NTuple{K,NTuple{N,Int64}}, AbstractVector{NTuple{N, Int64}}, FlattenedTensorList{T,N}};
-    ::Val{throw_errors}=Val(false),
-) where {throw_errors,N,K,T}
+print_mvars(io, r::AbstractVector{Int32}) = begin
+    printed = false
+    for i in eachindex(r)
+        if r[i] == 0 continue end
+        letter = (printed ? (r[i] < 0 ?  " - " : " + ") : (r[i] < 0 ? "-" : "")) * 
+            (abs(r[i]) != 1 || i == 1 ? "$(abs(r[i]))" : "") *
+            (i != 1 ? "nmlkopqrstuvwxyzbcdefghij"[mod(i-2,25)+1] : "") *
+            (i > 24 ? "$(div(i-2,25)+1)" : "")
+        print(io, letter)
+        printed = true
+    end
+end
 
-    # Flatten tree and create useful dictionaries
-    M = max(MAX_M, N)
-    C = MAX_C
-    KK = K
-    if featureSizes isa AbstractVector
-        KK = length(featureSizes)
-        featureSizes = ntuple(i -> featureSizes[i], Val(KK))
-    elseif featureSizes isa FlattenedTensorList
-        KK = length(featureSizes.positions)
-        featureSizes = ntuple(i -> featureSizes.positions[i][3], Val(KK))
+Base.show(io::IO, c::Constraint) = begin
+    if length(c.tuple) == 0
+        print(io, "EMPTY")
+        return
+    end
+    A = avars_size(c)
+    S = sets_size(c)
+    print_parensd(io, (io, av) ->  print(io, "a$(av)"), ", ", c.tuple)
+    print(io, " ∈ ")
+    print_delimited(io, (io, set) -> begin
+        print_parensd(io, print_mvars, ", ", [set[ax,:] for ax in 1:A])
+    end, " ∪ ", [c.sets[sx,:,:] for sx in 1:S])
+end
+
+Base.show(io::IO, cb::CombinedConstraints) = begin
+    print(io, "COMBINED: $(avar_count(cb)) entries\n")
+    for ax in axes(cb.values, 1)
+        if !avar_occupied(cb, ax) continue end
+        print(io, "  a$(ax) = ")
+        print_mvars(io, cb.values[ax,:])
+        print(io, "\n")
+    end
+    #print(io, "\n")
+end
+
+Base.show(io::IO, cs::Vector{Constraint}) = begin
+    print(io, "OUTER: $(length(cs)) entries\n")
+    print_delimited(io, (io, c) -> begin  
+        print(io, "  ")
+        print(io, c)
+    end, "\n", cs)
+    # print("\n\n")
+end
+
+# --------------------
+# FINAL FORM
+# -------------------
+
+macro make_constraint(tuple, sets...)
+    if tuple.head != :tuple || length(sets) == 0
+        !all(set -> set.head == :tuple, sets) || 
+        !all(set -> length(set.args) == length(tuple.args), sets)
+        error("The constraint has incorrect form. The correct form is: \n" *
+            "(tuple of integers representing the indices in the array of shapes (a-vars)) = sets...\n" *
+            "with each set being a tuple of same size containg linear expressions using constants and arbitrarily named variables (m-vars)")
+    end
+    
+    mvars_dicts = map(set -> begin
+        # get number of variables
+        d = Dict{Symbol, Int32}()
+        function traverse(expr)
+            if expr isa Symbol
+                if !(expr in keys(d)) && !(expr in (:+, :-, :*))
+                    d[expr] = length(d)+2
+                end
+            elseif expr isa Expr
+                for arg in expr.args
+                    traverse(arg)
+                end
+            end
+        end
+        traverse(set)
+        return d
+    end, sets)
+    S = length(sets)
+    A = length(tuple.args)
+    M = maximum(d -> length(d)+1, mvars_dicts)
+    finalsets = zeros(Int32, (S, A, M))
+
+    function show_err()
+        error("The expressions inside the set must be a linear combination of constants and variables" * 
+        ", so the only allowed operations are +, - and *. You also can't multiply variables together.")
     end
 
-    nodes = TensorNode{T,N}[]
-    flatten_tree!(nodes, tree)
-    if throw_errors
-        _shape_inference(nodes, operators, Val(M), Val(C), featureSizes)
-        return true
-    else
-        return try
-            _shape_inference(nodes, operators, Val(M), Val(C), featureSizes)
-            return true
-        catch e
-            return false
+    function lc_eval(sx, expr) # it returns an vector of size M being the linear combination of those
+        if expr isa Symbol
+            toret = zeros(Int32, M)
+            toret[mvars_dicts[sx][expr]] = 1
+            return toret
+        elseif expr isa Integer
+            toret = zeros(Int32, M)
+            toret[1] = expr
+            return toret
+        elseif expr isa Expr
+            if expr.head != :call
+                show_err()
+            end
+            if expr.args[1] == :+
+                toret = zeros(Int32, M)
+                for i in 2:length(expr.args)
+                    toret .+= lc_eval(sx, expr.args[i])
+                end
+                return toret
+            elseif expr.args[1] == :-
+                if length(expr.args) == 3
+                    return lc_eval(sx, expr.args[2]) .- lc_eval(sx, expr.args[3])
+                elseif length(expr.args) == 2
+                    return .- lc_eval(sx, expr.args[2])
+                else
+                    show_err()
+                end
+            elseif expr.args[1] == :*
+                vv = map(ex -> lc_eval(sx, ex), expr.args[2:end])
+                count_vv = count(ve -> !avar_constant(ve), vv)
+                if count_vv == 0
+                    toret = zeros(Int32, M)
+                    toret[1] = prod(ve -> ve[1], vv)
+                    return toret
+                elseif count_vv == 1
+                    varx = findfirst(ve -> !avar_constant(ve), vv)
+                    for i in eachindex(vv)
+                        if i == varx continue end
+                        vv[varx] .*= vv[i][1]
+                    end
+                    return vv[varx]
+                else
+                    show_err()
+                end
+            else
+                show_err()
+            end
+        else
+            show_err()
         end
     end
+
+    for sx in 1:S, ax in 1:A
+        @view(finalsets[sx, ax, :]) .= lc_eval(sx, sets[sx].args[ax])
+    end
+    return quote
+        $(esc(:Constraint))(
+            $(esc(Expr(:ref, :(Int32), tuple.args...))),
+            $finalsets
+        )
+    end
+end
+
+function push_constraints_broadcast(cs::AbstractVector{Constraint}, (outoffset, loffset)::NTuple{2,<:Integer}, ::Val{N}) where {N}
+    for nx in 1:N
+        push!(cs, @make_constraint((outoffset+nx, loffset+nx), (n, n)))
+    end
+end
+
+function push_constraints_broadcast(cs::AbstractVector{Constraint}, (outoffset, loffset, roffset)::NTuple{3,<:Integer}, ::Val{N}) where {N}
+    for nx in 1:N
+        push!(cs, @make_constraint((outoffset+nx, loffset+nx, roffset+nx), (n, 1, n), (n, n, 1), (n, n, n)))
+    end
+end
+
+function default_constraint_indeterminancy_resolve(c::Constraint, node::TensorNode{T,N}, dim::Integer, operators::TensorOperatorEnum) where {T,N}
+    S = sets_size(c)
+    s = rand(UInt32)%S+1
+    return Constraint(c.tuple, c.sets[s:s,:,:])
+end
+
+function shape_inference(
+    tree::TensorNode{T,N},
+    operators::TensorOperatorEnum,
+    cX_shapes::AbstractVector{NTuple{N, <:Integer}},
+    desired_shape::NTuple{N, <:Integer};
+    kws...
+) where {N,T}
+    push!(cX_shapes, desired_shape)
+    shape_inference(tree, operators, cX_shapes; kws...)
+    pop!(cX_shapes)
+end
+
+function shape_inference(
+    tree::TensorNode{T,N},
+    operators::TensorOperatorEnum,
+    cX::Union{FlattenedTensorList{T,N}, AbstractVector{NTuple{N, <:Integer}}};
+    indeterminancy_resolve::F1 = default_constraint_indeterminancy_resolve,
+) where {N,T,F1}
+
+    # now we have indices
+    renumber_nodes!(tree)
+    A = number_of_indices(tree)*N
+    cb = CombinedConstraints(A, 5)
+    cs = Constraint[]
+    sizehint!(cs, A)
+
+    function traverse(node)
+        if node.degree == 0
+            if !node.constant
+                push!(cs, Constraint(
+                    collect((node.index-1)*N .+ (1:N)),
+                    reshape(collect(if cX isa FlattenedTensorList 
+                        cX.positions[node.feature][3]
+                    else
+                        cX[node.feature]
+                    end), (1, N, 1))  
+                ))
+                # println("appending for ", node, " : ", cs[length(cs)])
+            end
+        elseif node.degree == 1
+            traverse(node.l)
+            # i = length(cs)+1
+            operators.unaops[node.op].push_constraints!(cs, ((node.index-1)*N, (node.l.index-1)*N), Val(N))
+            # print("appending for ", node, " : ")
+            # for ix in i:length(cs)
+            #     print(cs[ix], "   ")
+            # end
+            # print("\n")
+        elseif node.degree == 2
+            traverse(node.l)
+            traverse(node.r)
+            # i = length(cs)+1
+            operators.binops[node.op].push_constraints!(cs, ((node.index-1)*N, (node.l.index-1)*N, (node.r.index-1)*N), Val(N))
+            # print("appending for ", node, " : ")
+            # for ix in i:length(cs)
+            #     print(cs[ix], "   ")
+            # end
+            # print("\n")
+        end
+    end
+    function get_node_by_index(node, index)
+        if node.degree == 0
+            if node.index == index
+                return node
+            end
+        elseif node.degree == 1
+            if index == node.index
+                return node
+            elseif index <= node.l.index
+                return get_node_by_index(node.l, index)
+            end
+        elseif node.degree == 2
+            if index <= node.l.index
+                return get_node_by_index(node.l, index)
+            elseif index <= node.r.index
+                return get_node_by_index(node.r, index)
+            elseif index == node.index
+                return node
+            end
+        end
+    end
+    push!(cs, Constraint(
+        collect((tree.index-1)*N .+ (1:N)),
+        reshape(collect(
+            if cX isa FlattenedTensorList 
+                cX.positions[length(cX.positions)-1][3]
+            else
+                cX[length(cX)]
+            end
+        ), (1, N, 1))
+    ))
+    traverse(tree)
+
+    # println("--------- INITIAL SITUATION ------------")
+    # println(cb)
+    # println(cs)
+
+    while true
+        shape_inference_iteration(cs, cb)
+        # println("------- PARTIALLY FINAL SITUATION ------------")
+        # println(cb)
+        # println(cs)
+        if length(cs) != 0
+            # node = get_node_by_index()
+            node = get_node_by_index(tree, div(cs[1].tuple[1], N))
+            S = sets_size(cs[1])
+            s = rand(UInt32)%S+1
+            cs[1] = Constraint(cs[1].tuple, cs[1].sets[s:s,:,:])
+            #cs[1] = indeterminancy_resolve(cs[1], node, mod(cs[1].tuple[1], N), operators)
+        elseif mvars_size(cb) != 1
+            z = zeros(Int32, mvars_size(cb))
+            z[1] = rand(UInt32)%5+1
+                # TODO: create some sort of generator, given the already used shape, the operator, the nodes, etc
+                # maybe each operator should have a default generator that is random?
+                # this also means that
+            replace_var!(cb, 2, z)
+        else
+            break
+        end
+    end
+
+    # println("------- FULLY FINAL SITUATION ------------")
+    # println(cb)
+    # println(cs)
+
+    function final_traverse(node)
+        if node.degree == 1
+            final_traverse(node.l)
+        elseif node.degree == 2
+            final_traverse(node.l)
+            final_traverse(node.r)
+        end
+        node.shape = ntuple(i -> cb.values[(node.index-1)*N+i], Val(N))
+    end
+    final_traverse(tree)
+
+end
+
+
 end

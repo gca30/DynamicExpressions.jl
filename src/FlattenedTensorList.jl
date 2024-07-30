@@ -19,9 +19,14 @@ struct FlattenedTensorList{T,N,IXT,AT<:AbstractVector{T},APosInfo<:AbstractVecto
     #   N strides
 end
 
-function treat_as_flattened(buff::AT, sizes::Vector{NTuple{N, IXT}}, max_B::Integer) where {T,IXT,N,AT<:AbstractVector{T}}
+function treat_as_flattened(buff::AT, sizes::AbstractVector{NTuple{N, IXT}}, max_B::Integer) where {T,IXT,N,AT<:AbstractVector{T}}
     positions = Vector{FTLPositionInfo{Int32,N}}(undef, length(sizes))
-    map!(csize -> (0, prod(csize), csize, (1, cumprod(Base.front(csize))...)), positions, sizes)
+    println("SIZES ", sizes)
+    acum = 0
+    for fi in eachindex(sizes)
+        positions[fi] = (acum, prod(sizes[fi]), sizes[fi], (1, cumprod(Base.front(sizes[fi]))...))
+        acum += positions[fi][2]
+    end
     l = positions[end][1] + positions[end][2]
     b = div(length(buff), l)
     b = min(b, max_B)
@@ -49,6 +54,31 @@ function flatten(::Type{AT}, X::AbstractVector{<:AbstractArray{T,NP1}}; IXT=Int3
     return FlattenedTensorList{T, N, IXT, AT, Vector{FTLPositionInfo{IXT, N}}}(B, l, AT(flattened), positions)
 end
 
+function permute_features(ftl::FlattenedTensorList{T,N,IXT,AT,APT}, features::AbstractVector{IXT}) where {T,N,IXT,AT,APT}
+    B = ftl.B
+    l = sum(idx -> ftl.positions[idx][2], features)
+    reordered = AT(undef, B*l)
+    positions = APT(undef, f)
+    position = 0
+    for i in eachindex(features)
+        old_pos, size, sizes, strides = ftl.positions[features[i]]
+        positions[i] = (position, size, sizes, strides)
+        @view(reshape(@view(reordered[:]), (l,B))[(position+1):(position+size), :]) .= 
+            @view(reshape(@view(ftl.flattened[:]), (ftl.L, ftl.B))[(old_pos+1):(old_pos+size), :])
+        position += size
+    end
+    return FlattenedTensorList{T,N,IXT,AT,APT}(B, l, reordered, positions)
+end
+
+function permute_features!(ftl::FlattenedTensorList, features::AbstractVector)
+    ftl2 = permute_features(ftl, features)
+    ftl.flattened = ftl2.flattened
+    ftl.positions = ftl2.positions
+    ftl.L = ftl2.L
+    ftl.B = ftl2.B
+    return ftl
+end
+
 # gets an element
 @inline function Base.getindex(ftl::FlattenedTensorList{T,N,IXT,AT}, fi::Integer, bi::Integer, ixs::Vararg{Integer,N}) where {T,N,IXT,AT}
     acum, _, _, stride = ftl.positions[fi]
@@ -59,15 +89,26 @@ end
 # returns a reshape(view(AbstractArray)) representing a feature with all the samples
 @inline function Base.getindex(ftl::FlattenedTensorList{T,N,IXT,AT}, fi::Integer) where {T,N,IXT,AT}
     acum, fl, sizes, _ = ftl.positions[fi]
-    ffv = @view(reshape(ftl.flattened, (ftl.L, ftl.B))[(acum + 1):(acum + fl), :])
+    ffv = @view(reshape(@view(ftl.flattened[1:(ftl.L*ftl.B)]), (ftl.L, ftl.B))[(acum + 1):(acum + fl), :])
     return reshape(ffv, (sizes..., ftl.B))
 end
 
 # returns a reshape(view(AbstractArray)) representing a feature of the given sample
 @inline function Base.getindex(ftl::FlattenedTensorList{T,N,IXT,AT}, fi::Integer, bi::Integer) where {T,N,IXT,AT}
     acum, fl, sizes, _ = ftl.positions[fi]
-    ffv = @view(reshape(ftl.flattened, (ftl.L, ftl.B))[(acum + 1):(acum + fl), bi])
-    return reshape(ffv, (sizes...))
+    ffv = @view(reshape(@view(ftl.flattened[1:(ftl.L*ftl.B)]), (ftl.L, ftl.B))[(acum + 1):(acum + fl), bi])
+    return reshape(ffv, sizes)
+end
+
+function Base.display(ftl::FlattenedTensorList{T,N,IXT,AT}) where {T,N,IXT,AT}
+    print("$(length(ftl.positions))-feature $(ftl.B)-sample $(ftl.L)-samplelength FlattenedTensorList{$(T),$(N)} of sizes:\n")
+    for i in eachindex(ftl.positions)
+        print("   $(ftl.positions[i][3]) at pos $(ftl.positions[i][1])\n")
+    end
+    # println("with values:")
+    # for i in eachindex(ftl.positions)
+    #     print("   ", ftl[i, 1], "\n")
+    # end
 end
 
 end

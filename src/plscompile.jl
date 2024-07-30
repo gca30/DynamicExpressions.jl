@@ -1,36 +1,85 @@
 
 using DynamicExpressions.NodeModule: TensorNode
+using DynamicExpressions.NodeUtilsModule: recalculate_node_values!
 using DynamicExpressions.OperatorEnumModule
 using DynamicExpressions.OperatorEnumModule: TensorOperator, TensorOperatorEnum
-using DynamicExpressions.FlattenedTensorListModule: FlattenedTensorList, treat_as_flattened
+using DynamicExpressions.FlattenedTensorListModule: FlattenedTensorList, treat_as_flattened, flatten
 using DynamicExpressions.OperatorEnumConstructionModule
 using DynamicExpressions.OperatorEnumConstructionModule: broadcast_binop, broadcast_unaop, @extend_operators
 using DynamicExpressions.ShapeInferenceModule
 using DynamicExpressions.ShapeInferenceModule: @make_constraint, CombinedConstraints, Constraint, shape_inference
+using DynamicExpressions.EvaluateTensorsModule: eval_diff_tree_array_cpu, eval_tree_array_cpu
 
-c1 = TensorNode{Float64, 3}(; feature=1, constant=true)
-c2 = TensorNode{Float64, 3}(; feature=2, constant=true)
-c3 = TensorNode{Float64, 3}(; feature=3, constant=true)
-c4 = TensorNode{Float64, 3}(; feature=4, constant=true)
-c5 = TensorNode{Float64, 3}(; feature=5, constant=true)
-x1 = TensorNode{Float64, 3}(; feature=1, constant=false)
-x2 = TensorNode{Float64, 3}(; feature=2, constant=false)
-x3 = TensorNode{Float64, 3}(; feature=3, constant=false)
+c1 = TensorNode{Float32, 3}(; feature=1, constant=true)
+c2 = TensorNode{Float32, 3}(; feature=2, constant=true)
+c3 = TensorNode{Float32, 3}(; feature=3, constant=true)
+c4 = TensorNode{Float32, 3}(; feature=4, constant=true)
+c5 = TensorNode{Float32, 3}(; feature=5, constant=true)
+x1 = TensorNode{Float32, 3}(; feature=1, constant=false)
+x2 = TensorNode{Float32, 3}(; feature=2, constant=false)
+x3 = TensorNode{Float32, 3}(; feature=3, constant=false)
+x4 = TensorNode{Float32, 3}(; feature=3, constant=false)
 
-function woaw(x::T) where {T<:Number}
-    x^convert(T, 2) - x + one(T)
-end
+loss(x, y) = (x-y)^2
+woaw(x) = x^2-5*x+9
+
+op_loss = TensorOperator(;
+    symbol_name = :loss,
+    op! = function(res::AbstractArray{T,N}, l, r) where {T,N}
+        res[1] = sum((l.-r).^2)
+    end,
+    gradient! = function(res, l, dl, r)
+        @. dl = 2*(l-r)
+    end,
+    push_constraints! = function(cs, (resoff, loff, roff), ::Val{N}) where {N}
+        for nx in 1:N
+            push!(cs, @make_constraint((resoff+nx, loff+nx, roff+nx), (1, n, n)))
+        end
+    end,
+    complexity = (sl, sr) -> prod(sl)
+)
 
 op_mm = TensorOperator(;
     symbol_name = :mm,
     op! = function(res::AbstractArray{T,N}, l, r) where {T,N}
-        @assert N >= 2
-        @assert size(x)[3:end] == size(y)[3:end]
-        @assert size(x, 2) == size(y, 1)
-        res .= rand(size(l, 1), size(r, 2), size(l)[3:end]...)
+        # @show size(res)
+        # @show size(l)
+        # @show size(r)
+        for i in axes(l, 1), j in axes(r, 2)
+            selectdim(selectdim(res, 1, i), 1, j) .= 0
+            for k in axes(l, 2)
+                # @show i, j, k
+                # @show selectdim(selectdim(res, 1, i), 1, j)
+                # @show selectdim(selectdim(l, 1, i), 1, k)
+                # @show selectdim(selectdim(r, 1, k), 1, j)
+                selectdim(selectdim(res, 1, i), 1, j) .+= 
+                    selectdim(selectdim(l, 1, i), 1, k) .* 
+                    selectdim(selectdim(r, 1, k), 1, j)
+            end
+        end
     end,
     gradient! = function(res, dres, l, dl, r, dr, ::Val{comp}) where {comp}
-        # TODO: implement this and op!
+        if comp & 0b01 != 0 # right
+            # dr = mm(T(l), dres)
+            for i in axes(dr, 1), j in axes(dr, 2)
+                selectdim(selectdim(dr, 1, i), 1, j) .= 0
+                for k in axes(dres, 1)
+                    selectdim(selectdim(dr, 1, i), 1, j) .+= 
+                        selectdim(selectdim(l, 1, k), 1, i) .* 
+                        selectdim(selectdim(dres, 1, k), 1, j)
+                end
+            end
+        end
+        if comp & 0b10 != 0 # left
+            for i in axes(dl, 1), j in axes(dl, 2)
+                selectdim(selectdim(dl, 1, i), 1, j)
+                for k in axes(dres, 2)
+                    selectdim(selectdim(dl, 1, i), 1, j) .+= 
+                        selectdim(selectdim(dres, 1, i), 1, k) .* 
+                        selectdim(selectdim(r, 1, j), 1, k)
+                end
+            end
+        end
     end,
     push_constraints! = function(cs, (resoff, loff, roff), ::Val{N}) where {N}
         push!(cs, @make_constraint((resoff+1, resoff+2, loff+1, loff+2, roff+1, roff+2), (n, p, n, m, m, p)))
@@ -76,7 +125,7 @@ op_T = TensorOperator(;
 )
 
 operators = TensorOperatorEnum(;
-    binary_operators=[broadcast_binop(+), broadcast_binop(*), broadcast_binop(-), op_mm, op_conv], 
+    binary_operators=[broadcast_binop(+), broadcast_binop(*), broadcast_binop(-), op_mm, op_conv, op_loss], 
     unary_operators=[broadcast_unaop(-), broadcast_unaop(woaw), op_T]
 )
 @extend_operators operators
@@ -86,9 +135,10 @@ trees = [
     mm(mm(c4, x3), (c1 + x1 * c2) * x2 * c3),
     mm(c1, c2 + x2),
     mm(c3, c4 + mm(T(mm(c1, x1)), mm(c2, c5 + T(x2)))),
+    mm(c1, x1) + x2
 ]
 
-for tree in trees println(tree) end
+# for tree in trees println(tree) end
 
 
 # ----------------------
@@ -150,17 +200,56 @@ cb.values[1, 2] = 9
 cb.values[1, 3] = 1
 # print(cb)
 # print(cs)
+# cX = treat_as_flattened(buffer, [(3, 3, 1), (1, 3, 1), (3, 1, 1), (1, 1, 1)], 2)
+# for i in 1:4
+#     println("DOING TREE ", i)
+#     try
+#        @time shape_inference(trees[i], operators, cX)
+#     catch c
+#         println(c)
+#         println("TREE ", i, " FAILED")
+#     end
+# end
+# println(cX2)
+# println(cC)
+# println(methods(eval_diff_tree_array_cpu))
+# println(typeof(cX2))
+# println(typeof(cC))
+# println(typeof(trees[5]))
+# println(typeof(buffer))
 
 
-buffer = Vector{Float64}(undef, 32)
-cX = treat_as_flattened(buffer, [(3, 3, 1), (1, 3, 1), (3, 1, 1), (1, 1, 1)], 2)
+buffer = rand(Float32, 120)
 
-for i in 1:4
-    print("\n\n\nDOING TREE ", i, "\n\n")
-    try
-       shape_inference(trees[i], operators, cX; should_print=Val(false))
-    catch c
-        println(stderr, c)
-        println("TREE ", i, " FAILED\n\n")
-    end
-end
+# the inputs, with the labels at the end
+# cX = [x1|x2|x3|y]
+cX = flatten(Vector{Float32}, [rand(Float32, 10, 4, 1, 1), rand(Float32, 10, 4, 1, 1), rand(Float32, 10, 4, 1, 1), rand(Float32, 10, 4, 1, 1)])
+
+# the result of the operation will be computed here (if you don't compute the derivative)
+results = flatten(Vector{Float32}, [rand(Float32, 10, 4, 1, 1)])
+
+# the constants that are used in the expression
+# the first is the sample is the actual value and the second is the to-be-computed derivative
+cC = flatten(Vector{Float32}, [rand(Float32, 2, 4, 4, 1), rand(Float32, 2, 4, 1, 1)])
+
+# infers the shapes and puts them into the tree
+# later this will have a specific shape generator
+shape_inference(trees[5], operators, cX)
+recalculate_node_values!(trees[5], cX)
+
+reducer_op = op_loss
+
+# options:
+
+#                  the structured expression  inputs   where to store   working
+#                                                      the results      memory
+eval_tree_array_cpu(trees[5], cC, operators,  cX,      results,         buffer)
+
+# the reducer_op is applied for every sample to the result and  the last element of cX (the labels) 
+# to obtain a scalar, which is summed over the batch size to return a scalar 
+eval_tree_array_cpu(trees[5], cC, operators,  cX,      reducer_op,       buffer)
+
+# the reducer_op is applied for every sample to obtain a scalar, which is summed over the batch size to return a scalar 
+# the derivatives with respect to the final scalar are also written into the second sample in the constants ftl
+eval_diff_tree_array_cpu(trees[5], cC, operators,  cX, reducer_op,       buffer)
+

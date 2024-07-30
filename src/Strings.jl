@@ -1,8 +1,8 @@
 module StringsModule
 
 using ..UtilsModule: deprecate_varmap
-using ..OperatorEnumModule: AbstractOperatorEnum, TensorOperatorEnum
-using ..NodeModule: AbstractScalarExprNode, tree_mapreduce, AbstractTensorExprNode
+using ..OperatorEnumModule: AbstractOperatorEnum, TensorOperatorEnum, TensorOperator
+using ..NodeModule: AbstractScalarExprNode, tree_mapreduce, AbstractTensorExprNode, AbstractExprNode
 
 const OP_NAMES = Base.ImmutableDict(
     "safe_log" => "log",
@@ -41,6 +41,10 @@ function dispatch_op_name_short(::Val{deg}, operators::TensorOperatorEnum, idx) 
     else
         return get_op_name(operators.binops[idx])::Vector{Char}
     end
+end
+
+function get_op_name(op::TensorOperator)
+    return Vector{Char}(String(op.symbol_name))
 end
 
 @generated function get_op_name(op::F)::Vector{Char} where {F}
@@ -94,7 +98,11 @@ function string_constant(val)
 end
 
 function string_constant_tensor(feature, shape)
-    str = "c$(feature)<"  
+    str = "c$(feature)"
+    if length(shape) == 0
+        return str
+    end
+    str *= "<"  
     for i in eachindex(shape)
         if i != 1 str *= "x" end
         str *= "$(shape[i])"
@@ -248,6 +256,57 @@ function string_tree(
         end,
     )
     return String(strip_brackets(raw_output))
+end
+
+function string_debug_tree_header(
+    tree::AbstractTensorExprNode, 
+    operators::Union{TensorOperatorEnum, Nothing}, 
+    variable_names::Union{AbstractVector{<:AbstractString},Nothing}
+)
+    s = ""
+    if tree.degree == 0
+        if tree.constant
+            s = String(string_constant_tensor(tree.feature, ()))
+        else
+            s = String(string_variable(tree.feature, variable_names))
+        end
+    elseif tree.degree == 1
+        s = "unaop " * String(dispatch_op_name_short(Val(1), operators, tree.op))
+    elseif tree.degree == 2
+        s = "binop " * String(dispatch_op_name_short(Val(2), operators, tree.op))
+    end
+    s *= " <"
+    for i in eachindex(tree.shape)
+        if i != 1 s *= "x" end
+        s *= "$(tree.shape[i])"
+    end
+    s *= "> "
+    s *= "i$(tree.index) f$(tree.feature) g$(tree.grad_ix)"
+    s *= tree.constant ? "  consts" : "  noconsts"
+end
+
+function string_debug_tree_header(tree::AbstractScalarExprNode, operators::Union{AbstractOperatorEnum, Nothing}, variable_names::Union{AbstractVector{<:AbstractString},Nothing})
+    return "NOT YET IMPLEMENTED"
+end
+
+function string_debug_tree(
+    tree::AbstractExprNode{T},
+    operators::Union{AbstractOperatorEnum, Nothing}=nothing,
+    f_header = string_debug_tree_header,
+    variable_names::Union{AbstractVector{<:AbstractString},Nothing}=nothing
+) where {T}
+    function recurse(node, indent1, indent2)
+        val = indent1 * f_header(node, operators, variable_names) * "\n"
+        if node.degree == 0
+        elseif node.degree == 1
+            val *= recurse(node.l, indent2 * "└─", indent2 * "  ")
+        elseif node.degree == 2
+            val *= recurse(node.l, indent2 * "├─", indent2 * "│ ")
+            val *= recurse(node.r, indent2 * "└─", indent2 * "  ")
+        end
+        return val
+    end
+    return recurse(tree, "", "")
 end
 
 

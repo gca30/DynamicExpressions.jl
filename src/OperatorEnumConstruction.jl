@@ -626,6 +626,8 @@ function _overload_common_operators()
 end
 _overload_common_operators()
 
+gradient(op, l) = (l,)
+gradient(op, l, r) = (r, l)
 
 broadcast_unaop(op::Fnum ; op_complexity=1, symbol::Union{Symbol, Nothing}=nothing) where {Fnum} = TensorOperator(;
     symbol_name = symbol === nothing ? Symbol(op) : symbol,
@@ -647,10 +649,10 @@ broadcast_binop(op::Fnum ; op_complexity=1, symbol::Union{Symbol, Nothing}=nothi
     # (l, r, res) -> (@. res = op(l, r)),
     gradient! = function(res, ∂res, l, ∂l, r, ∂r, ::Val{comp}) where {comp}
         grads = gradient.(op, l, r)
-        if comp & 0b10
+        if comp & 0b10 != 0
             sum!(∂l, ∂res .* map(x->x[1], grads))
         end
-        if comp & 0b01
+        if comp & 0b01 != 0
             sum!(∂r, ∂res .* map(x->x[2], grads))
         end
     end,
