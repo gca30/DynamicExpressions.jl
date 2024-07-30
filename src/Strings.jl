@@ -282,7 +282,7 @@ function string_debug_tree_header(
     end
     s *= "> "
     s *= "i$(tree.index) f$(tree.feature) g$(tree.grad_ix)"
-    s *= tree.constant ? "  consts" : "  noconsts"
+    s *= tree.constant ? " cs" : " nc"
 end
 
 function string_debug_tree_header(tree::AbstractScalarExprNode, operators::Union{AbstractOperatorEnum, Nothing}, variable_names::Union{AbstractVector{<:AbstractString},Nothing})
@@ -293,7 +293,8 @@ function string_debug_tree(
     tree::AbstractExprNode{T},
     operators::Union{AbstractOperatorEnum, Nothing}=nothing,
     f_header = string_debug_tree_header,
-    variable_names::Union{AbstractVector{<:AbstractString},Nothing}=nothing
+    variable_names::Union{AbstractVector{<:AbstractString},Nothing}=nothing;
+    indent=""
 ) where {T}
     function recurse(node, indent1, indent2)
         val = indent1 * f_header(node, operators, variable_names) * "\n"
@@ -306,7 +307,7 @@ function string_debug_tree(
         end
         return val
     end
-    return recurse(tree, "", "")
+    return recurse(tree, indent, indent)
 end
 
 

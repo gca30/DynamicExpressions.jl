@@ -39,6 +39,8 @@ op_loss = TensorOperator(;
     complexity = (sl, sr) -> prod(sl)
 )
 
+@inline seldims(x, i, j) = selectdim(selectdim(x, 1, i), 1 , j)
+
 op_mm = TensorOperator(;
     symbol_name = :mm,
     op! = function(res::AbstractArray{T,N}, l, r) where {T,N}
@@ -46,37 +48,33 @@ op_mm = TensorOperator(;
         # @show size(l)
         # @show size(r)
         for i in axes(l, 1), j in axes(r, 2)
-            selectdim(selectdim(res, 1, i), 1, j) .= 0
+            # @show i, j
+            seldims(res, i, j) .= 0
             for k in axes(l, 2)
                 # @show i, j, k
                 # @show selectdim(selectdim(res, 1, i), 1, j)
                 # @show selectdim(selectdim(l, 1, i), 1, k)
                 # @show selectdim(selectdim(r, 1, k), 1, j)
-                selectdim(selectdim(res, 1, i), 1, j) .+= 
-                    selectdim(selectdim(l, 1, i), 1, k) .* 
-                    selectdim(selectdim(r, 1, k), 1, j)
+                seldims(res, i, j) .+= seldims(l, i, k) .* seldims(r, k, j)
             end
         end
     end,
     gradient! = function(res, dres, l, dl, r, dr, ::Val{comp}) where {comp}
         if comp & 0b01 != 0 # right
-            # dr = mm(T(l), dres)
+            # DR = L^T DRES
             for i in axes(dr, 1), j in axes(dr, 2)
-                selectdim(selectdim(dr, 1, i), 1, j) .= 0
+                seldims(dr, i, j) .= 0
                 for k in axes(dres, 1)
-                    selectdim(selectdim(dr, 1, i), 1, j) .+= 
-                        selectdim(selectdim(l, 1, k), 1, i) .* 
-                        selectdim(selectdim(dres, 1, k), 1, j)
+                    seldims(dr, i, j) .+= seldims(l, k, i) .* seldims(dres, k, j)
                 end
             end
         end
         if comp & 0b10 != 0 # left
+            # DL = DRES R^T
             for i in axes(dl, 1), j in axes(dl, 2)
-                selectdim(selectdim(dl, 1, i), 1, j)
+                seldims(dl, i, j)
                 for k in axes(dres, 2)
-                    selectdim(selectdim(dl, 1, i), 1, j) .+= 
-                        selectdim(selectdim(dres, 1, i), 1, k) .* 
-                        selectdim(selectdim(r, 1, j), 1, k)
+                    seldims(dl, i, j) .+= seldims(dres, i, k) .* seldims(r, j, k)
                 end
             end
         end
@@ -219,14 +217,15 @@ cb.values[1, 3] = 1
 # println(typeof(buffer))
 
 
-buffer = rand(Float32, 120)
+buffer = Vector{Float32}(undef, 1000_000)
 
 # the inputs, with the labels at the end
 # cX = [x1|x2|x3|y]
-cX = flatten(Vector{Float32}, [rand(Float32, 10, 4, 1, 1), rand(Float32, 10, 4, 1, 1), rand(Float32, 10, 4, 1, 1), rand(Float32, 10, 4, 1, 1)])
+B = 1000
+cX = flatten(Vector{Float32}, [rand(Float32, B, 4, 1, 1), rand(Float32, B, 4, 1, 1), rand(Float32, B, 4, 1, 1), rand(Float32, B, 4, 1, 1)])
 
 # the result of the operation will be computed here (if you don't compute the derivative)
-results = flatten(Vector{Float32}, [rand(Float32, 10, 4, 1, 1)])
+results = flatten(Vector{Float32}, [rand(Float32, B, 4, 1, 1)])
 
 # the constants that are used in the expression
 # the first is the sample is the actual value and the second is the to-be-computed derivative
@@ -238,6 +237,8 @@ shape_inference(trees[5], operators, cX)
 recalculate_node_values!(trees[5], cX)
 
 reducer_op = op_loss
+
+# SOMETIMES THIS WHOLE THING DOESN'T WORK BECAUSE SHAPE_INFERENCE IS NOT DETERMINISTIC :'(
 
 # options:
 

@@ -48,37 +48,16 @@ using ..StringsModule:
 #   the operator will have a macro that takes a number from 1:threads and returns what to do in that thread
 #   a macro is necesary so that the gpu kernel compiles instead of calling functions (which might not work on the gpu)
 
-# function eval_tree_array_cpu(
-#     tree::AbstractTensorExprNode{T,N},
-#     cX::FlattenedTensorList{T,N,IXT,AT},
-#     constants::FlattenedTensorList{T,N,IXT,AT},
-#     operators::TensorOperatorEnum
-# ) where {T,N,IXT,AT}
-
-#     if tree.degree == 0
-#         if tree.constant
-#             # value
-#             return constants[tree.feature]
-#         else
-#             # input
-#             return cX[tree.feature]
-#         end
-#     elseif tree.degree == 1
-#         top = operators.unaops[tree.op]
-#         inner = eval_tree_array_cpu(tree.l, cX, constants, operator)
-#         outer = Array{T, N+1}(undef, tree.shape..., size(inner, N+1))
-#         top.op!(inner, outer)
-#         return outer
-#     elseif tree.degree == 2
-#         top = operators.binops[tree.op]
-#         inner_l = eval_tree_array_cpu(tree.l, cX, constants, operator)
-#         inner_r = eval_tree_array_cpu(tree.r, cX, constants, operator)
-#         outer = Array{T, N+1}(undef, tree.shape..., max(size(inner_l, N+1), size(inner_r, N+1)))
-#         top.op!(inner_l, inner_r, outer)
-#         return outer
-#     end
-
-# end
+# macro to be only used in the implementations of these functions
+macro valsrc(node)
+    return quote if $(esc(node)).degree == 0 && $(esc(node)).constant
+        $(esc(:constants))[$(esc(node)).feature, 1]
+    elseif $(esc(node)).degree == 0
+        $(esc(:cX))[$(esc(node)).feature, $(esc(:batch_offset))+$(esc(:i))]
+    else
+        $(esc(:temp))[$(esc(node)).feature, $(esc(:i))]
+    end end
+end
 
 function _forward_eval_diff_tree_array_cpu(
     node::AbstractTensorExprNode{T,N},
@@ -88,6 +67,7 @@ function _forward_eval_diff_tree_array_cpu(
     temp::FlattenedTensorList{T,N,IXT,AT},
     batch_offset::Integer, batch_len
 ) where {T,N,IXT,AT}
+    print("FORWARD EVAL OF $(node.index):\n", string_debug_tree(node, operators; indent="    "))
     if node.degree == 0
         return
     elseif node.degree == 1
@@ -96,36 +76,20 @@ function _forward_eval_diff_tree_array_cpu(
         for i in 1:batch_len
             top.op!(
                 temp[node.feature, i], # res
-                if node.l.constant 
-                    constants[node.l.feature, 1]
-                elseif node.l.degree == 0
-                    cX[node.l.feature, batch_offset+i]
-                else
-                    temp[node.l.feature, i]
-                end # left
+                @valsrc(node.l) # left
             )
         end
     elseif node.degree == 2
         top = operators.binops[node.op]
         _forward_eval_diff_tree_array_cpu(node.l, constants, operators, cX, temp, batch_offset, batch_len)
         _forward_eval_diff_tree_array_cpu(node.r, constants, operators, cX, temp, batch_offset, batch_len)
+        @show node.l
+        @show node.r
         for i in 1:batch_len
             top.op!(
                 temp[node.feature, i], # res
-                if node.l.constant 
-                    constants[node.l.feature, 1]
-                elseif node.l.degree == 0
-                    cX[node.l.feature, batch_offset+i]
-                else
-                    temp[node.l.feature, i]
-                end, # left
-                if node.r.constant 
-                    constants[node.r.feature, 1]
-                elseif node.r.degree == 0
-                    cX[node.r.feature, batch_offset+i]
-                else
-                    temp[node.r.feature, i]
-                end # right
+                @valsrc(node.l), # left
+                @valsrc(node.r) # right
             )
         end
     end
@@ -139,6 +103,7 @@ function _backward_eval_diff_tree_array_cpu(
     temp::FlattenedTensorList{T,N,IXT,AT},
     batch_offset::Integer, batch_len
 ) where {T,N,IXT,AT}
+    print("BACKWARDS EVAL OF $(node.index):\n", string_debug_tree(node, operators; indent= "   "))
     if node.degree == 0
         if node.constant
             for i in 1:batch_len
@@ -151,13 +116,7 @@ function _backward_eval_diff_tree_array_cpu(
             top.gradient!(
                 temp[node.feature, i], # res
                 temp[node.grad_ix, i], # dres
-                if node.l.degree == 0 && node.l.constant 
-                    constants[node.l.feature, 1]
-                elseif node.l.degree == 0
-                    cX[node.l.feature, i]
-                else
-                    temp[node.l.feature, i]
-                end, # left
+                @valsrc(node.l), # left
                 temp[node.l.grad_ix, i] # dleft
             )
         end
@@ -168,25 +127,13 @@ function _backward_eval_diff_tree_array_cpu(
             top.gradient!(
                 temp[node.feature, i], # res
                 temp[node.grad_ix, i], # dres
-                if node.l.degree == 0 && node.l.constant 
-                    constants[node.l.feature, 1]
-                elseif node.l.degree == 0
-                    cX[node.l.feature, batch_offset+i]
-                else
-                    temp[node.l.feature, i]
-                end, # left
+                @valsrc(node.l), # left
                 if node.l.constant
                     temp[node.l.grad_ix, i]
                 else
                     temp[1, i]
                 end, # dleft
-                if node.r.degree == 0 && node.r.constant 
-                    constants[node.r.feature, 1]
-                elseif node.r.degree == 0
-                    cX[node.r.feature, batch_offset+i]
-                else
-                    temp[node.r.feature, i]
-                end, # right
+                @valsrc(node.r), # right
                 if node.r.constant
                     temp[node.r.grad_ix, i]
                 else
@@ -223,13 +170,7 @@ function _eval_diff_tree_array_cpu(
         # reducer operator forward evaluation
         reducer_op.op!(
             temp[1, i], # res
-            if tree.degree == 0 && tree.constant 
-                constants[tree.feature, 1]
-            elseif tree.degree == 0
-                cX[tree.feature, batch_offset + i]
-            else
-                temp[tree.feature, i]
-            end, # left
+            @valsrc(tree), # left
             cX[length(cX.positions), batch_offset+i] # right
         )
         result += temp[1, i][1]
@@ -238,13 +179,7 @@ function _eval_diff_tree_array_cpu(
         if tree.constant
             reducer_op.gradient!(
                 temp[1, i], # res
-                if tree.degree == 0 && tree.constant 
-                    constants[tree.feature, 1]
-                elseif tree.degree == 0
-                    cX[tree.feature, batch_offset + i]
-                else
-                    temp[tree.feature, i]
-                end, # left
+                @valsrc(tree.l), # left
                 temp[tree.grad_ix, i], # dleft
                 cX[length(cX.positions), batch_offset+i] # right
             )
@@ -271,6 +206,7 @@ function eval_diff_tree_array_cpu(
     println(string_debug_tree(tree, operators))
     output = make_ftl_from_tree(tree, buffer, cX.B, Val(true))
     display(output)
+    println()
 
     for i in eachindex(constants.positions)
         @. constants[i, 2] = zero(T)
@@ -302,13 +238,7 @@ function _eval_tree_array_cpu(
     for i in 1:batch_len
         reducer_op.op!(
             temp[1, i], # res
-            if tree.degree == 0 && tree.constant 
-                constants[tree.feature, 1]
-            elseif tree.degree == 0
-                cX[tree.feature, batch_offset + i]
-            else
-                temp[tree.feature, i]
-            end, # left
+            @valsrc(tree), # left
             cX[length(cX.positions), batch_offset+i] # right
         )
         result += temp[1, i][1]

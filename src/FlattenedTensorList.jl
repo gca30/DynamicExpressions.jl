@@ -21,7 +21,7 @@ end
 
 function treat_as_flattened(buff::AT, sizes::AbstractVector{NTuple{N, IXT}}, max_B::Integer) where {T,IXT,N,AT<:AbstractVector{T}}
     positions = Vector{FTLPositionInfo{Int32,N}}(undef, length(sizes))
-    println("SIZES ", sizes)
+
     acum = 0
     for fi in eachindex(sizes)
         positions[fi] = (acum, prod(sizes[fi]), sizes[fi], (1, cumprod(Base.front(sizes[fi]))...))
