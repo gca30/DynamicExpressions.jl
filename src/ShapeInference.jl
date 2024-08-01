@@ -4,7 +4,7 @@ module ShapeInferenceModule
 using ...NodeModule: TensorNode
 using ..OperatorEnumModule: TensorOperatorEnum
 using ..FlattenedTensorListModule: FlattenedTensorList
-using ...NodeUtilsModule: renumber_nodes!, number_of_indices
+using ...NodeUtilsModule: recalculate_node_indices!, number_of_indices
 
 # ----------------------
 # DEFINITIONS
@@ -743,7 +743,7 @@ function shape_inference(
 ) where {N,T,F1}
 
     # now we have indices
-    renumber_nodes!(tree)
+    recalculate_node_indices!(tree)
     A = number_of_indices(tree)*N
     cb = CombinedConstraints(A, 5)
     cs = Constraint[]
@@ -755,7 +755,7 @@ function shape_inference(
                 push!(cs, Constraint(
                     collect((node.index-1)*N .+ (1:N)),
                     reshape(collect(if cX isa FlattenedTensorList 
-                        cX.positions[node.feature][3]
+                        cX.positions[node.feature].shape
                     else
                         cX[node.feature]
                     end), (1, N, 1))  
@@ -808,7 +808,7 @@ function shape_inference(
         collect((tree.index-1)*N .+ (1:N)),
         reshape(collect(
             if cX isa FlattenedTensorList 
-                cX.positions[length(cX.positions)-1][3]
+                cX.positions[length(cX.positions)-1].shape
             else
                 cX[length(cX)]
             end

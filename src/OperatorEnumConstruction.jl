@@ -626,17 +626,20 @@ function _overload_common_operators()
 end
 _overload_common_operators()
 
-gradient(op, l) = (l,)
-gradient(op, l, r) = (r, l)
+gradient(::typeof(+), l) = 1
+gradient(::typeof(-), l) = -1
+gradientl(::typeof(+), l, r) = 1
+gradientr(::typeof(+), l, r) = 1
+gradientl(::typeof(-), l, r) = 1
+gradientr(::typeof(-), l, r) = -1
+gradientl(::typeof(*), l, r) = r
+gradientr(::typeof(*), l, r) = l
 
-broadcast_unaop(op::Fnum ; op_complexity=1, symbol::Union{Symbol, Nothing}=nothing) where {Fnum} = TensorOperator(;
+broadcast_unaop(op::Fnum; op_complexity=1, symbol::Union{Symbol, Nothing}=nothing) where {Fnum} = TensorOperator(;
     symbol_name = symbol === nothing ? Symbol(op) : symbol,
     op! = (l, res) -> (@. res = op(l)),
     # (l, res) -> (@. res = op(l)),
-    gradient! = (res, ∂res, l, ∂l) -> begin
-        map!(first, ∂l, gradient.(op, l))
-        @. ∂l *= ∂res
-    end,
+    gradient! = (res, ∂res, l, ∂l) -> (@. ∂l = gradient(op, l) * ∂res),
     push_constraints! = push_constraints_broadcast,
     complexity = sl -> length(sl) * op_complexity
 )
@@ -648,12 +651,16 @@ broadcast_binop(op::Fnum ; op_complexity=1, symbol::Union{Symbol, Nothing}=nothi
     op! = (l, r, res) -> (@. res = op(l, r)),
     # (l, r, res) -> (@. res = op(l, r)),
     gradient! = function(res, ∂res, l, ∂l, r, ∂r, ::Val{comp}) where {comp}
-        grads = gradient.(op, l, r)
-        if comp & 0b10 != 0
-            sum!(∂l, ∂res .* map(x->x[1], grads))
-        end
-        if comp & 0b01 != 0
-            sum!(∂r, ∂res .* map(x->x[2], grads))
+        #grads = gradient.(op, l, r)
+        if comp == 0b11
+            ∂res .*= gradientl.(op, l, r)
+            error("NO COPYING")
+        elseif comp == 0b10
+            ∂res .*= gradientl.(op, l, r)
+            sum!(∂l, ∂res)
+        elseif comp == 0b01
+            ∂res .*= gradientr.(op, l, r)
+            sum!(∂r, ∂res)
         end
     end,
     push_constraints! = push_constraints_broadcast,

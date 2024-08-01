@@ -59,6 +59,59 @@ macro valsrc(node)
     end end
 end
 
+@generated function dispatch_deg1_forward_eval(
+    node::AbstractTensorExprNode{T,N},
+    constants::FlattenedTensorList{T,N},
+    operators::TensorOperatorEnum{NB,BINOPS,NU,UNAOPS},
+    cX::FlattenedTensorList{T,N},
+    temp::FlattenedTensorList{T,N},
+    batch_offset::Integer, batch_len,
+) where {T,N,NB,BINOPS,NU,UNAOPS}
+    return quote
+        println(string_debug_tree(node.l))
+        Base.Cartesian.@nif(
+            $NU,
+            opix -> opix == node.op,
+            opix -> let top = operators.unaops[opix]
+                for i in 1:batch_len
+                    top.op!(
+                        temp[node.feature, i], # res
+                        @valsrc(node.l) # left
+                    )
+                end
+            end
+        )
+    end
+end
+
+@generated function dispatch_deg2_forward_eval(
+    node::AbstractTensorExprNode{T,N},
+    constants::FlattenedTensorList{T,N},
+    operators::TensorOperatorEnum{NB,BINOPS,NU,UNAOPS},
+    cX::FlattenedTensorList{T,N},
+    temp::FlattenedTensorList{T,N},
+    batch_offset::Integer, batch_len,
+) where {T,N,NB,BINOPS,NU,UNAOPS}
+    return quote
+        # println("BINARY NODE:")
+        # print(string_debug_tree(node.r))
+        # print(string_debug_tree(node.l))
+        Base.Cartesian.@nif(
+            $NB,
+            opix -> opix == node.op,
+            opix -> let top = operators.binops[opix]
+                for i in 1:batch_len
+                    top.op!(
+                        temp[node.feature, i], # res
+                        @valsrc(node.l), # left
+                        @valsrc(node.r) # right
+                    )
+                end
+            end
+        )
+    end
+end
+
 function _forward_eval_diff_tree_array_cpu(
     node::AbstractTensorExprNode{T,N},
     constants::FlattenedTensorList{T,N,IXT,AT},
@@ -67,31 +120,27 @@ function _forward_eval_diff_tree_array_cpu(
     temp::FlattenedTensorList{T,N,IXT,AT},
     batch_offset::Integer, batch_len
 ) where {T,N,IXT,AT}
-    print("FORWARD EVAL OF $(node.index):\n", string_debug_tree(node, operators; indent="    "))
+    # print("FORWARD EVAL OF $(node.index):\n", string_debug_tree(node, operators; indent="    "))
     if node.degree == 0
         return
     elseif node.degree == 1
-        top = operators.unaops[node.op]
         _forward_eval_diff_tree_array_cpu(node.l, constants, operators, cX, temp, batch_offset, batch_len)
-        for i in 1:batch_len
-            top.op!(
-                temp[node.feature, i], # res
-                @valsrc(node.l) # left
-            )
-        end
+        #top = operators.unaops[node.op]
+        dispatch_deg1_forward_eval(node, constants, operators, cX, temp, batch_offset, batch_len)
+        #for i in 1:batch_len
+        #    top.op!(
+        #        temp[node.feature, i], # res
+        #        @valsrc(node.l) # left
+        #    )
+        #end
+        # println("GOT AS FIRST VALUE ", temp[node.feature, 1])
     elseif node.degree == 2
-        top = operators.binops[node.op]
         _forward_eval_diff_tree_array_cpu(node.l, constants, operators, cX, temp, batch_offset, batch_len)
         _forward_eval_diff_tree_array_cpu(node.r, constants, operators, cX, temp, batch_offset, batch_len)
-        @show node.l
-        @show node.r
-        for i in 1:batch_len
-            top.op!(
-                temp[node.feature, i], # res
-                @valsrc(node.l), # left
-                @valsrc(node.r) # right
-            )
-        end
+        # @show node.l
+        # @show node.r
+        dispatch_deg2_forward_eval(node, constants, operators, cX, temp, batch_offset, batch_len)
+        # println("GOT AS FIRST VALUE ", temp[node.feature, 1])
     end
 end
 
@@ -103,7 +152,7 @@ function _backward_eval_diff_tree_array_cpu(
     temp::FlattenedTensorList{T,N,IXT,AT},
     batch_offset::Integer, batch_len
 ) where {T,N,IXT,AT}
-    print("BACKWARDS EVAL OF $(node.index):\n", string_debug_tree(node, operators; indent= "   "))
+    # print("BACKWARDS EVAL OF $(node.index):\n", string_debug_tree(node, operators; indent= "   "))
     if node.degree == 0
         if node.constant
             for i in 1:batch_len
@@ -120,6 +169,7 @@ function _backward_eval_diff_tree_array_cpu(
                 temp[node.l.grad_ix, i] # dleft
             )
         end
+        # println("GOT AS FIRST VALUE ", temp[node.feature, 1])
         _backward_eval_diff_tree_array_cpu(node.l, constants, operators, cX, temp, batch_offset, batch_len)
     elseif node.degree == 2
         top = operators.binops[node.op]
@@ -142,6 +192,7 @@ function _backward_eval_diff_tree_array_cpu(
                 Val((Int8(node.l.constant) << 1) | Int8(node.r.constant)) # compute flags
             )
         end
+        # println("GOT AS FIRST VALUE ", temp[node.feature, 1])
         if node.l.constant
             _backward_eval_diff_tree_array_cpu(node.l, constants, operators, cX, temp, batch_offset, batch_len)
         end
@@ -203,10 +254,10 @@ function eval_diff_tree_array_cpu(
     buffer::AbstractVector{T}
 ) where {T,N,IXT,AT,APT}
     
-    println(string_debug_tree(tree, operators))
+    # println(string_debug_tree(tree, operators))
     output = make_ftl_from_tree(tree, buffer, cX.B, Val(true))
-    display(output)
-    println()
+    # display(output)
+    # println()
 
     for i in eachindex(constants.positions)
         @. constants[i, 2] = zero(T)

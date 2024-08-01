@@ -149,7 +149,7 @@ end
 
 
 
-function renumber_constants!(tree::AbstractTensorExprNode{T,N}, constants::FlattenedTensorList{T,N}) where {T,N}
+function recalculate_constant_indices!(tree::AbstractTensorExprNode{T,N}, constants::FlattenedTensorList{T,N}) where {T,N}
     function recurse(node, cindex, v)
         if node.degree == 2
             cindex = recurse(node.l, cindex, v)
@@ -157,27 +157,26 @@ function renumber_constants!(tree::AbstractTensorExprNode{T,N}, constants::Flatt
         elseif node.degree == 1
             cindex = recurse(node.l, cindex, v)
         elseif node.degree == 0 && node.constant
-            v[cindex] = node.featue
+            v[cindex] = node.feature
             node.feature = cindex
             return cindex + 1
         end
         return cindex
     end
-    max_consts = tree_mapreduce((n -> n.degree == 0 && n.constant ? n.feature : 0), max, tree)
-    count_consts = tree_mapreduce((n -> n.degree == 0 && n.constant ? 1 : 0), +, tree)
-    if max_consts == count_consts
-        return
-    else
-        v = Vector{Int32}(undef, count_consts)
-        # v[new_feature_index] = old_feature_index
-        recurse(tree, 1, v)
-        permute_features!(constants, v)
+    count_consts = count_constant_nodes(tree)
+    v = Vector{Int32}(undef, count_consts)
+    recurse(tree, 1, v)
+    for i in eachindex(v)
+        if i != v[i]
+            permute_features!(constants, v)
+            return
+        end
     end
 end
 
 # renumbers the nodes to be from 1 to the number of temporary nodes (meaning inputs and constants are not numbered)
 # this removes the information of the original constant indices
-function renumber_nodes!(tree::AbstractTensorExprNode)
+function recalculate_node_indices!(tree::AbstractTensorExprNode)
     function recurse(node, nfeature, nindex) 
         if node.degree == 2
             nfeature, nindex = recurse(node.l, nfeature, nindex)
@@ -204,18 +203,18 @@ end
 @inline buffer_count_with_gradients(tree) = tree_mapreduce((n -> max(n.constant ? n.grad_ix : 1, n.degree == 0 ? 1 : n.feature)), max, tree)
 @inline number_of_indices(tree) = tree_mapreduce((n -> n.index), max, tree)
 
-function recalculate_has_constants!(tree::AbstractTensorExprNode)
+function recalculate_constant!(tree::AbstractTensorExprNode)
     if tree.degree == 2
-        recalculate_has_constants!(tree.l)
-        recalculate_has_constants!(tree.r)
+        recalculate_constant!(tree.l)
+        recalculate_constant!(tree.r)
         tree.constant = tree.l.constant || tree.r.constant
     elseif tree.degree == 1
-        recalculate_has_constants!(tree.l)
+        recalculate_constant!(tree.l)
         tree.constant = tree.l.constant
     end
 end
 
-function renumber_gradients!(tree::AbstractTensorExprNode)
+function recalculate_gradient_indices!(tree::AbstractTensorExprNode)
     b = buffer_count_without_gradients(tree)
     # maxf - maximum feature so far, 1 if no features
     function recurse(node, ix)
@@ -236,10 +235,10 @@ function renumber_gradients!(tree::AbstractTensorExprNode)
 end
 
 function recalculate_node_values!(tree::AbstractTensorExprNode{T,N}, constants::FlattenedTensorList{T,N}) where {T,N}
-    renumber_constants!(tree, constants)
-    recalculate_has_constants!(tree)
-    renumber_nodes!(tree)
-    renumber_gradients!(tree)
+    recalculate_constant_indices!(tree, constants)
+    recalculate_constant!(tree)
+    recalculate_node_indices!(tree)
+    recalculate_gradient_indices!(tree)
 end
 
 function make_ftl_from_tree(tree::AbstractTensorExprNode{T,N}, buffer::AbstractVector{T}, maxB, ::Val{with_gradients}) where {T,N,with_gradients}
@@ -263,7 +262,68 @@ function make_ftl_from_tree(tree::AbstractTensorExprNode{T,N}, buffer::AbstractV
     return treat_as_flattened(buffer, tempsizes, maxB)
 end
 
-
+function reshape_constants(tree::AbstractTensorExprNode{T,N}, constants::FlattenedTensorList{T,N,IXT,AT}) where {T,N,IXT,AT}
+    all_ok = tree_mapreduce(
+        node -> is_node_constant(node) ? constants.positions[node.feature].shape == node.shape : true,
+        &, tree, Bool
+    )
+    if all_ok return constants end
+    v = Vector{NTuple{N,IXT}}(undef, count_constant_nodes(tree))
+    tree_mapreduce(
+        node -> begin
+            if is_node_constant(node)
+                v[node.feature] = node.shape
+            end
+            return nothing
+        end,
+        Returns(nothing),
+        tree, Nothing
+    )
+    B = constants.B
+    buf = AT(undef, B*sum(prod, v))
+    consts2 = treat_as_flattened(buf, v, B)
+    for ci in eachindex(v)
+        new_shape = consts2.positions[ci].shape
+        new_len = consts2.positions[ci].len
+        old_shape = constants.positions[ci].shape 
+        old_len = constants.positions[ci].len
+        if new_shape == old_shape
+            consts2[ci] .= constants[ci]
+        elseif new_len == old_len
+            @view(consts2[ci][:]) .= @view(constants[ci][:])
+        elseif new_len < old_len
+            @view(consts2[ci][:]) .= @view(@view(reshape(constants[ci], (old_len, B))[1:new_len, :])[:])
+        else
+            off = 0
+            while off <= new_len
+                if off + old_len <= new_len
+                    @view(@view(reshape(consts2[ci], (new_len, B))[(off+1):(off+old_len), :])[:]) .= @view(constants[ci][:])
+                else
+                    @view(@view(reshape(consts2[ci], (new_len, B))[(off+1):(new_len), :])[:]) .= 
+                    @view(@view(reshape(constants[ci], (old_len, B))[1:(new_len-off), :])[:])
+                end
+                off += old_len
+            end
+        end
+        
+        # ideally it would work like this:
+        # first rule: if they have the same amount of elements, just keep them (equivalent to julia `reshape` function)
+        # second rule: if they are broadcastable, broadcast them
+        # if all(((n, o),) -> n == o || n == 1 || o == 1, zip(new_shape, old_shape))
+        #     # should reduce?
+        #     if any(((n, o),) -> n == 1 && o != 1, zip(new_shape, old_shape))
+        #         consts2[ci] .= sum(constants[ci]; dims=
+        #             filter(i -> new_shape[i] == 1 && old_shape[i] != 1, ntuple(i -> i, Val(N)))
+        #         )
+        #     else
+        #         consts2[ci] .= constants[ci]
+        #     end
+        # end
+        # third rule: get what dimensions are broadcastable, but clamp the rest
+        
+    end
+    return consts2
+end
 
 ## Assign index to nodes of a tree
 # This will mirror a Node struct, rather

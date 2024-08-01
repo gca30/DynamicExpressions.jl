@@ -1,6 +1,6 @@
 
 using DynamicExpressions.NodeModule: TensorNode
-using DynamicExpressions.NodeUtilsModule: recalculate_node_values!
+using DynamicExpressions.NodeUtilsModule: recalculate_node_values!, reshape_constants
 using DynamicExpressions.OperatorEnumModule
 using DynamicExpressions.OperatorEnumModule: TensorOperator, TensorOperatorEnum
 using DynamicExpressions.FlattenedTensorListModule: FlattenedTensorList, treat_as_flattened, flatten
@@ -29,7 +29,9 @@ op_loss = TensorOperator(;
         res[1] = sum((l.-r).^2)
     end,
     gradient! = function(res, l, dl, r)
-        @. dl = 2*(l-r)
+        #@show typeof(dl)
+        #@show typeof(l)
+        @. dl = l
     end,
     push_constraints! = function(cs, (resoff, loff, roff), ::Val{N}) where {N}
         for nx in 1:N
@@ -39,7 +41,7 @@ op_loss = TensorOperator(;
     complexity = (sl, sr) -> prod(sl)
 )
 
-@inline seldims(x, i, j) = selectdim(selectdim(x, 1, i), 1 , j)
+@inline seldims(x::AbstractArray{T,N}, i, j) where {T,N} = x[i, j, ntuple(Returns(:), Val(N-2))...]
 
 op_mm = TensorOperator(;
     symbol_name = :mm,
@@ -72,7 +74,7 @@ op_mm = TensorOperator(;
         if comp & 0b10 != 0 # left
             # DL = DRES R^T
             for i in axes(dl, 1), j in axes(dl, 2)
-                seldims(dl, i, j)
+                seldims(dl, i, j) .= 0
                 for k in axes(dres, 2)
                     seldims(dl, i, j) .+= seldims(dres, i, k) .* seldims(r, j, k)
                 end
@@ -209,10 +211,10 @@ cb.values[1, 3] = 1
 #     end
 # end
 # println(cX2)
-# println(cC)
+# println(constants)
 # println(methods(eval_diff_tree_array_cpu))
 # println(typeof(cX2))
-# println(typeof(cC))
+# println(typeof(constants))
 # println(typeof(trees[5]))
 # println(typeof(buffer))
 
@@ -221,7 +223,7 @@ buffer = Vector{Float32}(undef, 1000_000)
 
 # the inputs, with the labels at the end
 # cX = [x1|x2|x3|y]
-B = 1000
+B = 3_000
 cX = flatten(Vector{Float32}, [rand(Float32, B, 4, 1, 1), rand(Float32, B, 4, 1, 1), rand(Float32, B, 4, 1, 1), rand(Float32, B, 4, 1, 1)])
 
 # the result of the operation will be computed here (if you don't compute the derivative)
@@ -229,28 +231,62 @@ results = flatten(Vector{Float32}, [rand(Float32, B, 4, 1, 1)])
 
 # the constants that are used in the expression
 # the first is the sample is the actual value and the second is the to-be-computed derivative
-cC = flatten(Vector{Float32}, [rand(Float32, 2, 4, 4, 1), rand(Float32, 2, 4, 1, 1)])
 
 # infers the shapes and puts them into the tree
 # later this will have a specific shape generator
+constants = flatten(Vector{Float32}, [rand(Float32, 2, 4, 1, 1), rand(Float32, 2, 4, 1, 1)])
 shape_inference(trees[5], operators, cX)
-recalculate_node_values!(trees[5], cX)
+recalculate_node_values!(trees[5], constants)
+constants = reshape_constants(trees[5], constants)
 
 reducer_op = op_loss
 
+# eval_diff_tree_array_cpu(trees[5], constants, operators,  cX, reducer_op,       buffer)
+
+# B = 11
+# while B < 40_000
+#     global B
+#     global cX
+#     global results
+#     global constants
+#     if B < 1000
+#         B = Int32(floor(B*1.1))
+#     else
+#         B = Int32(floor(B*1.05))
+#     end
+#     cX = flatten(Vector{Float32}, [rand(Float32, B, 4, 1, 1), rand(Float32, B, 4, 1, 1), rand(Float32, B, 4, 1, 1), rand(Float32, B, 4, 1, 1)])
+
+#     # the result of the operation will be computed here (if you don't compute the derivative)
+#     results = flatten(Vector{Float32}, [rand(Float32, B, 4, 1, 1)])
+
+#     # the constants that are used in the expression
+#     # the first is the sample is the actual value and the second is the to-be-computed derivative
+
+#     # infers the shapes and puts them into the tree
+#     # later this will have a specific shape generator
+#     constants = flatten(Vector{Float32}, [rand(Float32, 2, 4, 1, 1), rand(Float32, 2, 4, 1, 1)])
+#     shape_inference(trees[5], operators, cX)
+#     recalculate_node_values!(trees[5], constants)
+#     constants = reshape_constants(trees[5], constants)
+
+#     print(B, " ")
+#     @time eval_diff_tree_array_cpu(trees[5], constants, operators,  cX, reducer_op,       buffer)
+# end
+
 # SOMETIMES THIS WHOLE THING DOESN'T WORK BECAUSE SHAPE_INFERENCE IS NOT DETERMINISTIC :'(
+# NOW IT WORKS BECAUSE WE RESHAPE THE CONSTANTS
 
 # options:
 
 #                  the structured expression  inputs   where to store   working
 #                                                      the results      memory
-eval_tree_array_cpu(trees[5], cC, operators,  cX,      results,         buffer)
+# eval_tree_array_cpu(trees[5], constants, operators,  cX,      results,         buffer)
 
 # the reducer_op is applied for every sample to the result and  the last element of cX (the labels) 
 # to obtain a scalar, which is summed over the batch size to return a scalar 
-eval_tree_array_cpu(trees[5], cC, operators,  cX,      reducer_op,       buffer)
+# eval_tree_array_cpu(trees[5], constants, operators,  cX,      reducer_op,       buffer)
 
 # the reducer_op is applied for every sample to obtain a scalar, which is summed over the batch size to return a scalar 
 # the derivatives with respect to the final scalar are also written into the second sample in the constants ftl
-eval_diff_tree_array_cpu(trees[5], cC, operators,  cX, reducer_op,       buffer)
+# eval_diff_tree_array_cpu(trees[5], constants, operators,  cX, reducer_op,       buffer)
 
