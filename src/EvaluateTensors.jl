@@ -6,7 +6,10 @@ using ..FlattenedTensorListModule:
     treat_as_flattened,
     sample_flat,
     mapself_ti!,
-    feature
+    feature,
+    feature_flat,
+    value,
+    map2_ti!
 using ..NodeModule:
     AbstractNode,
     AbstractExprNode,
@@ -52,6 +55,18 @@ using ..StringsModule:
 #   a macro is necesary so that the gpu kernel compiles instead of calling functions (which might not work on the gpu)
 
 # macro to be only used in the implementations of these functions
+#=
+macro valsrc(node)
+    return quote if $(esc(node)).degree == 0 && $(esc(node)).constant
+        $(esc(:constants))[$(esc(node)).feature, 1]
+    elseif $(esc(node)).degree == 0
+        $(esc(:cX))[$(esc(node)).feature, $(esc(:batch_offset))+$(esc(:i))]
+    else
+        $(esc(:temp))[$(esc(node)).feature, $(esc(:i))]
+    end end
+end
+=#
+
 macro valsrc(node)
     return quote if $(esc(node)).degree == 0 && $(esc(node)).constant
         $(esc(:feature))($(esc(:constants)), $(esc(node)).feature, $(esc(:i)))
@@ -159,17 +174,17 @@ function _backward_eval_diff_tree_array_cpu(
     if node.degree == 0
         if node.constant
             for i in 1:batch_len
-                @. constants[node.feature, 2] += temp[node.grad_ix, i]
+                map2_ti!(+, feature(constants, node.feature, 2), feature(constants, node.feature, 2), feature(temp, node.grad_ix, i))
             end
         end
     elseif node.degree == 1
         top = operators.unaops[node.op]
         for i in 1:batch_len
             top.gradient!(
-                temp[node.feature, i], # res
-                temp[node.grad_ix, i], # dres
+                feature(temp, node.feature, i), # res
+                feature(temp, node.grad_ix, i), # dres
                 @valsrc(node.l), # left
-                temp[node.l.grad_ix, i] # dleft
+                feature(temp, node.l.grad_ix, i) # dleft
             )
         end
         # println("GOT AS FIRST VALUE ", temp[node.feature, 1])
@@ -178,19 +193,19 @@ function _backward_eval_diff_tree_array_cpu(
         top = operators.binops[node.op]
         for i in 1:batch_len
             top.gradient!(
-                temp[node.feature, i], # res
-                temp[node.grad_ix, i], # dres
+                feature(temp, node.feature, i), # res
+                feature(temp, node.grad_ix, i), # dres
                 @valsrc(node.l), # left
                 if node.l.constant
-                    temp[node.l.grad_ix, i]
+                    feature(temp, node.l.grad_ix, i)
                 else
-                    temp[1, i]
+                    feature(temp, 1, i)
                 end, # dleft
                 @valsrc(node.r), # right
                 if node.r.constant
-                    temp[node.r.grad_ix, i]
+                    feature(temp, node.r.grad_ix, i)
                 else
-                    temp[1, i]
+                    feature(temp, 1, i)
                 end, # dright
                 Val((Int8(node.l.constant) << 1) | Int8(node.r.constant)) # compute flags
             )
@@ -227,7 +242,7 @@ function _eval_diff_tree_array_cpu(
             @valsrc(tree), # left
             feature(cX, length(cX.positions), batch_offset+i) # right
         )
-        result += temp[1, i][1]
+        result += value(feature_flat(temp, 1, i), 1)
 
         # reducer operator gradient evaluation
         if tree.constant
@@ -289,11 +304,11 @@ function _eval_tree_array_cpu(
     result = zero(T)
     for i in 1:batch_len
         reducer_op.op!(
-            temp[1, i], # res
+            feature(temp, 1, i), # res
             @valsrc(tree), # left
-            cX[length(cX.positions), batch_offset+i] # right
+            feature(cX, length(cX.positions), batch_offset+i) # right
         )
-        result += temp[1, i][1]
+        result += value(feature_flat(temp, 1, i), 1)
     end
     return result
 end
@@ -311,13 +326,13 @@ function _eval_tree_array_cpu(
     _forward_eval_diff_tree_array_cpu(tree, constants, operators, cX, temp, batch_offset, batch_len)
     
     for i in 1:batch_len
-        out_results[1, batch_offset+i] .= if tree.degree == 0 && tree.constant 
-            constants[tree.feature, 1]
+        copy_ti!(feature(out_results, 1, batch_offset+i), if tree.degree == 0 && tree.constant 
+            feature(constants, tree.feature, 1)
         elseif tree.degree == 0
-            cX[tree.feature, batch_offset + i]
+            feature(cX, tree.feature, batch_offset + i)
         else
-            temp[tree.feature, i]
-        end
+            feature(temp, tree.feature, i)
+        end)
     end
 
 end

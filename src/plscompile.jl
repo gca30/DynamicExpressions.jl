@@ -34,8 +34,8 @@ woaw(x) = x^2-5*x+9
 
 op_loss = TensorOperator(;
     symbol_name = :loss,
-    op! = function(res::TensorIndex, l, r)
-        res.ar[res.offset+1] = mapreduce2nb_ti!((l, r) -> (l-r)^2, +, 0, l, r)
+    op! = function(res::TensorIndex{IXT,N,T}, l, r) where {IXT,N,T}
+        res.ar[res.offset+1] = mapreduce2nb_ti!((l, r) -> (l-r)^2, +, zero(T), l, r)
     end,
     gradient! = function(res, l, dl, r)
         map2_ti!((l, r) -> 2*(l-r), res, l, r)
@@ -52,13 +52,13 @@ op_loss = TensorOperator(;
 
 op_mm = TensorOperator(;
     symbol_name = :mm,
-    op! = function(res, l, r)
+    op! = function(res::TensorIndex{IXT,N,T}, l, r) where {IXT,N,T}
         # @show size(res)
         # @show size(l)
         # @show size(r)
         for i in axes(l, 1), j in axes(r, 2)
             # @show i, j
-            mapself_ti!(Returns(0), seldims(res, i, j))
+            mapself_ti!(Returns(zero(T)), seldims(res, i, j))
             for k in axes(l, 2)
                 # @show i, j, k
                 # @show selectdim(selectdim(res, 1, i), 1, j)
@@ -68,11 +68,11 @@ op_mm = TensorOperator(;
             end
         end
     end,
-    gradient! = function(res, dres, l, dl, r, dr, ::Val{comp}) where {comp}
+    gradient! = function(res::TensorIndex{IXT,N,T}, dres, l, dl, r, dr, ::Val{comp}) where {comp,IXT,N,T}
         if comp & 0b01 != 0 # right
             # DR = L^T DRES
             for i in axes(dr, 1), j in axes(dr, 2)
-                mapself_ti!(Returns(0), seldims(dr, i, j))
+                mapself_ti!(Returns(zero(T)), seldims(dr, i, j))
                 for k in axes(dres, 1)
                     mapnb_ti!((d, l, r) -> d+l*r, seldims(dr, i, j), seldims(dr, i, j), seldims(l, k, i), seldims(dres, k, j))
                 end
@@ -81,7 +81,7 @@ op_mm = TensorOperator(;
         if comp & 0b10 != 0 # left
             # DL = DRES R^T
             for i in axes(dl, 1), j in axes(dl, 2)
-                mapself_ti!(Returns(0), seldims(dl, i, j))
+                mapself_ti!(Returns(zero(T)), seldims(dl, i, j))
                 for k in axes(dres, 2)
                     mapnb_ti!((d, l, r) -> d+l*r, seldims(dl, i, j), seldims(dl, i, j), seldims(dres, i, k), seldims(r, j, k))
                 end
@@ -258,35 +258,35 @@ reducer_op = op_loss
 
 eval_diff_tree_array_cpu(trees[5], constants, operators,  cX, reducer_op,       buffer)
 
-# B = 11
-# while B < 40_000
-#     global B
-#     global cX
-#     global results
-#     global constants
-#     if B < 1000
-#         B = Int32(floor(B*1.1))
-#     else
-#         B = Int32(floor(B*1.05))
-#     end
-#     cX = flatten(Vector{Float32}, [rand(Float32, B, 4, 1, 1), rand(Float32, B, 4, 1, 1), rand(Float32, B, 4, 1, 1), rand(Float32, B, 4, 1, 1)])
+B = 11
+while B < 40_000
+    global B
+    global cX
+    global results
+    global constants
+    if B < 1000
+        B = Int32(floor(B*1.1))
+    else
+        B = Int32(floor(B*1.05))
+    end
+    cX = flatten(Vector{Float32}, [rand(Float32, B, 4, 1, 1), rand(Float32, B, 4, 1, 1), rand(Float32, B, 4, 1, 1), rand(Float32, B, 4, 1, 1)])
 
-#     # the result of the operation will be computed here (if you don't compute the derivative)
-#     results = flatten(Vector{Float32}, [rand(Float32, B, 4, 1, 1)])
+    # the result of the operation will be computed here (if you don't compute the derivative)
+    results = flatten(Vector{Float32}, [rand(Float32, B, 4, 1, 1)])
 
-#     # the constants that are used in the expression
-#     # the first is the sample is the actual value and the second is the to-be-computed derivative
+    # the constants that are used in the expression
+    # the first is the sample is the actual value and the second is the to-be-computed derivative
 
-#     # infers the shapes and puts them into the tree
-#     # later this will have a specific shape generator
-#     constants = flatten(Vector{Float32}, [rand(Float32, 2, 4, 1, 1), rand(Float32, 2, 4, 1, 1)])
-#     shape_inference(trees[5], operators, cX)
-#     recalculate_node_values!(trees[5], constants)
-#     constants = reshape_constants(trees[5], constants)
+    # infers the shapes and puts them into the tree
+    # later this will have a specific shape generator
+    constants = flatten(Vector{Float32}, [rand(Float32, 2, 4, 1, 1), rand(Float32, 2, 4, 1, 1)])
+    shape_inference(trees[5], operators, cX)
+    recalculate_node_values!(trees[5], constants)
+    constants = reshape_constants(trees[5], constants)
 
-#     print(B, " ")
-#     @time eval_diff_tree_array_cpu(trees[5], constants, operators,  cX, reducer_op,       buffer)
-# end
+    print(B, " ")
+    @time eval_diff_tree_array_cpu(trees[5], constants, operators,  cX, reducer_op,       buffer)
+end
 
 # SOMETIMES THIS WHOLE THING DOESN'T WORK BECAUSE SHAPE_INFERENCE IS NOT DETERMINISTIC :'(
 # NOW IT WORKS BECAUSE WE RESHAPE THE CONSTANTS

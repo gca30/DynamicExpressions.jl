@@ -71,6 +71,10 @@ end
     return TensorIndex{IXT,2,T,AT}(ftl.flattened, ftl.positions[fi].offset, (ftl.positions[fi].len, ftl.B), (1, ftl.L))
 end
 
+@inline function feature_flat(ftl::FlattenedTensorList{T,N,IXT,AT}, fi::Integer, bi::Integer) where {T,N,IXT,AT}
+    return TensorIndex{IXT,1,T,AT}(ftl.flattened, ftl.L*(bi-1) + ftl.positions[fi].offset, (ftl.positions[fi].len,), (1,))
+end
+
 @inline function feature(ftl::FlattenedTensorList{T,N,IXT,AT}, fi::Integer, bi::Integer) where {T,N,IXT,AT}
     return TensorIndex{IXT,N,T,AT}(ftl.flattened, ftl.positions[fi].offset + ftl.L*(bi-1), ftl.positions[fi].shape, ftl.positions[fi].strides)
 end
@@ -88,7 +92,7 @@ end
 end
 
 @inline function value(tix::TensorIndex{IXT,N,T}, ixs::Vararg{Integer,N}) where {T,IXT,N}
-    return @inbounds tix.ar[sum(ntuple(nx -> (ixs[nx]-1) * tix.strides[nx], Val(N))) + offset + 1]
+    return @inbounds tix.ar[sum(ntuple(nx -> (ixs[nx]-1) * tix.strides[nx], Val(N))) + tix.offset + 1]
 end
 
 @inline function indices(tix::TensorIndex{IXT,N,T}, i::Integer) where {T,IXT,N}
@@ -342,7 +346,7 @@ function map2_ti!(op::F, dest::TensorIndex{IXT,N}, lterm::TensorIndex{IXT,N}, rt
 end
 
 function mapreduce2nb_ti!(op::F, reduce_op::Fr, startr::T, lterm::TensorIndex{IXT,N,T}, rterm::TensorIndex{IXT,N}) where {IXT,N,T,F,Fr}
-    iterlen = lenght(lterm)
+    iterlen = length(lterm)
 
     di = MVector{N,IXT}(ntuple(Returns(1), Val(N))...)
     loffjump = ntuple(nx -> lterm.strides[nx+1] - lterm.shape[nx]*lterm.strides[nx], Val(N-1))
@@ -351,12 +355,17 @@ function mapreduce2nb_ti!(op::F, reduce_op::Fr, startr::T, lterm::TensorIndex{IX
     rinar = rterm.offset+1
     i = 0
 
-    while i < iterlen
+    while true
         i += 1
         startr = reduce_op(startr, op(lterm.ar[linar], rterm.ar[rinar]))
         
         linar += lterm.strides[1]
         rinar += rterm.strides[1]
+
+        if i >= iterlen
+            break
+        end
+
         di[1] += 1
         nx = 1
         while di[nx] > lterm.shape[nx]

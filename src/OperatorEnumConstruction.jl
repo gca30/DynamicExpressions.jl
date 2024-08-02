@@ -627,7 +627,7 @@ end
 _overload_common_operators()
 
 using ..ShapeInferenceModule: push_constraints_broadcast
-using ..FlattenedTensorListModule: copy_ti!, map2_ti!
+using ..FlattenedTensorListModule: copy_ti!, map2_ti!, mapnb_ti!
 
 # TODO: get gradient from somewhere else
 gradient(::typeof(+), l) = 1
@@ -644,7 +644,7 @@ broadcast_unaop(op::Fnum; op_complexity=1, symbol::Union{Symbol, Nothing}=nothin
     symbol_name = symbol === nothing ? Symbol(op) : symbol,
     op! = (l, res) -> copy_ti!(op, res, l),
     # (l, res) -> (@. res = op(l)),
-    gradient! = (res, ∂res, l, ∂l) -> (@. ∂l = gradient(op, l) * ∂res),
+    gradient! = (res, ∂res, l, ∂l) -> map2_ti!((l, r) -> gradient(op, l)*r, ∂l, l, ∂res),
     push_constraints! = push_constraints_broadcast,
     complexity = sl -> length(sl) * op_complexity
 )
@@ -654,16 +654,11 @@ broadcast_binop(op::Fnum ; op_complexity=1, symbol::Union{Symbol, Nothing}=nothi
     op! = (l, r, res) -> map2_ti!(op, res, l, r),
     # (l, r, res) -> (@. res = op(l, r)),
     gradient! = function(res, ∂res, l, ∂l, r, ∂r, ::Val{comp}) where {comp}
-        #grads = gradient.(op, l, r)
-        if comp == 0b11
-            ∂res .*= gradientl.(op, l, r)
-            error("NO COPYING")
-        elseif comp == 0b10
-            ∂res .*= gradientl.(op, l, r)
-            sum!(∂l, ∂res)
-        elseif comp == 0b01
-            ∂res .*= gradientr.(op, l, r)
-            sum!(∂r, ∂res)
+        if comp & 0b10 == 0b10
+            mapnb_ti!((a, b, c) -> gradientl(op, b, c)*a, ∂l, ∂res, l, r)
+        end
+        if comp & 0b01 == 0b01
+            mapnb_ti!((a, b, c) -> gradientr(op, b, c)*a, ∂r, ∂res, l, r)
         end
     end,
     push_constraints! = push_constraints_broadcast,
