@@ -310,6 +310,25 @@ function string_debug_tree(
     return recurse(tree, indent, indent)
 end
 
+function string_debug_operator_enum(oe::TensorOperatorEnum)
+    str = "TensorOperatorEnum{$(length(oe.binops)), ("
+    p = false
+    for to in oe.binops
+        if p str *= ", " end
+        p = true
+        str *= String(to.symbol_name)
+    end
+    str *= "), $(length(oe.unaops)), ("
+    p = false
+    for to in oe.unaops
+        if p str *= ", " end
+        p = true
+        str *= String(to.symbol_name)
+    end
+    str *= ")}"
+    return str
+end
+
 
 # Print an equation
 for io in ((), (:(io::IO),))

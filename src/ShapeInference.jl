@@ -4,7 +4,8 @@ module ShapeInferenceModule
 using ...NodeModule: TensorNode
 using ..OperatorEnumModule: TensorOperatorEnum
 using ..FlattenedTensorListModule: FlattenedTensorList
-using ...NodeUtilsModule: recalculate_node_indices!, number_of_indices
+using ...TensorNodeUtilsModule: recalculate_node_indices!, number_of_indices
+# using ..TensorExpressionModule: AbstractTensorExpression, get_tree, get_operators
 
 # ----------------------
 # DEFINITIONS
@@ -138,6 +139,57 @@ end
 
 function solve_dioph(c::Constraint, cb::CombinedConstraints, constsMap::CombinedConstraints, axc::Integer)
     error("solve_dioph not yet implemented")
+    # EARLIER IMPLEMENTATION:
+    # cnt = count(!=(0), @view(result[2:end]))
+    # temp = Vector{MVector{4, Int32}}(undef, cnt)
+    # #             bc, u, v, index
+    # first = true
+    # for i in reverse(eachindex(result))
+    #     if result[i] == 0 || i == 1 continue end
+    #     if first
+    #         first = false
+    #         temp[cnt][1] = result[i]
+    #         temp[cnt][2] = 1
+    #         temp[cnt][3] = 0
+    #         temp[cnt][4] = i
+    #         cnt -= 1
+    #     else
+    #         g, u, v = gcdx(result[i], temp[cnt+1][1])
+    #         temp[cnt][1] = g
+    #         temp[cnt][2] = u
+    #         temp[cnt][3] = v
+    #         temp[cnt][4] = i
+    #         cnt -= 1
+    #     end
+    # end
+    # if mod(result[1], temp[1][4]) != 0
+    #     return 2, ax # no solutions error
+    # end
+
+    # K = first_unused_var!(cb, constsMap)
+    # if K > currentVars
+    #     currentVars = varvecsize(cb)
+    #     constsMap = expand(constsMap)
+    # end
+    # nc = zeros(Int32, currentVars)
+    # ncc = zeros(Int32, currentVars)
+    # nc[1] = -div(result[1], temp[1][4])
+    # for i in eachindex(temp)
+    #     if i == length(temp)
+    #         continue 
+    #     end 
+    #     @. ncc = nc * temp[i][2]
+    #     ncc[K] += div(temp[i+1][1], temp[i][1])
+    #     replace_var!(cb.values, temp[i][4], ncc)
+    #     replace_var!(constsMap, temp[i][4], ncc)
+    #     @. nc = nc * temp[i][3]
+    #     nc[K] -= div(temp[i][1], temp[i][1])
+    #     K = temp[i][4]
+    #     if i == length(temp)-1
+    #         replace_var!(cb.values, temp[i+1][4], nc)
+    #         replace_var!(constsMap, temp[i+1][4], nc)
+    #     end
+    # end
     return 1000, 1
 end
 
@@ -211,7 +263,7 @@ function outsubst(c::Constraint, cb::CombinedConstraints)
         end
 
         # if there are any variables with coefficients equal to 1, it is pretty easy to solve
-        # there is an extraneous variable wich is equal to the linear combination of thee other variables
+        # there is an extraneous variable wich is equal to the linear combination of the other variables
         mxcb = findfirst(x -> abs(x) == 1, @view(constsMap.values[1, 2:end])) + 1
         coef = constsMap.values[1, mxcb]
         constsMap.values[1, mxcb] = 0
@@ -860,6 +912,8 @@ function shape_inference(
     final_traverse(tree)
 
 end
+
+# @inline shape_inference(te::AbstractTensorExpression, args...; kwargs) = shape_inference(get_tree(te), get_operators(te), args...; kwargs...)
 
 
 end

@@ -1,14 +1,23 @@
 
 using DynamicExpressions.NodeModule: TensorNode
-using DynamicExpressions.NodeUtilsModule: recalculate_node_values!, reshape_constants
+using DynamicExpressions.TensorNodeUtilsModule: recalculate_node_values!, reshape_constants
 using DynamicExpressions.OperatorEnumModule
 using DynamicExpressions.OperatorEnumModule: TensorOperator, TensorOperatorEnum
-using DynamicExpressions.FlattenedTensorListModule: FlattenedTensorList, treat_as_flattened, flatten
+using DynamicExpressions.FlattenedTensorListModule: 
+    FlattenedTensorList, treat_as_flattened, flatten,
+    map2_ti!,
+    mapreduce2nb_ti!,
+    copy_ti!,
+    mapnb_ti!,
+    mapself_ti!,
+    TensorIndex,
+    selectdim_ti
 using DynamicExpressions.OperatorEnumConstructionModule
 using DynamicExpressions.OperatorEnumConstructionModule: broadcast_binop, broadcast_unaop, @extend_operators
 using DynamicExpressions.ShapeInferenceModule
 using DynamicExpressions.ShapeInferenceModule: @make_constraint, CombinedConstraints, Constraint, shape_inference
 using DynamicExpressions.EvaluateTensorsModule: eval_diff_tree_array_cpu, eval_tree_array_cpu
+using DynamicExpressions.StringsModule: string_debug_tree
 
 c1 = TensorNode{Float32, 3}(; feature=1, constant=true)
 c2 = TensorNode{Float32, 3}(; feature=2, constant=true)
@@ -25,13 +34,11 @@ woaw(x) = x^2-5*x+9
 
 op_loss = TensorOperator(;
     symbol_name = :loss,
-    op! = function(res::AbstractArray{T,N}, l, r) where {T,N}
-        res[1] = sum((l.-r).^2)
+    op! = function(res::TensorIndex, l, r)
+        res.ar[res.offset+1] = mapreduce2nb_ti!((l, r) -> (l-r)^2, +, 0, l, r)
     end,
     gradient! = function(res, l, dl, r)
-        #@show typeof(dl)
-        #@show typeof(l)
-        @. dl = l
+        map2_ti!((l, r) -> 2*(l-r), res, l, r)
     end,
     push_constraints! = function(cs, (resoff, loff, roff), ::Val{N}) where {N}
         for nx in 1:N
@@ -41,23 +48,23 @@ op_loss = TensorOperator(;
     complexity = (sl, sr) -> prod(sl)
 )
 
-@inline seldims(x::AbstractArray{T,N}, i, j) where {T,N} = x[i, j, ntuple(Returns(:), Val(N-2))...]
+@inline seldims(x, i, j) = selectdim_ti(selectdim_ti(x, 1, i), 2, j) #x[i, j, ntuple(Returns(:), Val(N-2))...]
 
 op_mm = TensorOperator(;
     symbol_name = :mm,
-    op! = function(res::AbstractArray{T,N}, l, r) where {T,N}
+    op! = function(res, l, r)
         # @show size(res)
         # @show size(l)
         # @show size(r)
         for i in axes(l, 1), j in axes(r, 2)
             # @show i, j
-            seldims(res, i, j) .= 0
+            mapself_ti!(Returns(0), seldims(res, i, j))
             for k in axes(l, 2)
                 # @show i, j, k
                 # @show selectdim(selectdim(res, 1, i), 1, j)
                 # @show selectdim(selectdim(l, 1, i), 1, k)
                 # @show selectdim(selectdim(r, 1, k), 1, j)
-                seldims(res, i, j) .+= seldims(l, i, k) .* seldims(r, k, j)
+                mapnb_ti!((d, l, r) -> d+l*r, seldims(res, i, j), seldims(res, i, j), seldims(l, i, k), seldims(r, k, j))
             end
         end
     end,
@@ -65,18 +72,18 @@ op_mm = TensorOperator(;
         if comp & 0b01 != 0 # right
             # DR = L^T DRES
             for i in axes(dr, 1), j in axes(dr, 2)
-                seldims(dr, i, j) .= 0
+                mapself_ti!(Returns(0), seldims(dr, i, j))
                 for k in axes(dres, 1)
-                    seldims(dr, i, j) .+= seldims(l, k, i) .* seldims(dres, k, j)
+                    mapnb_ti!((d, l, r) -> d+l*r, seldims(dr, i, j), seldims(dr, i, j), seldims(l, k, i), seldims(dres, k, j))
                 end
             end
         end
         if comp & 0b10 != 0 # left
             # DL = DRES R^T
             for i in axes(dl, 1), j in axes(dl, 2)
-                seldims(dl, i, j) .= 0
+                mapself_ti!(Returns(0), seldims(dl, i, j))
                 for k in axes(dres, 2)
-                    seldims(dl, i, j) .+= seldims(dres, i, k) .* seldims(r, j, k)
+                    mapnb_ti!((d, l, r) -> d+l*r, seldims(dl, i, j), seldims(dl, i, j), seldims(dres, i, k), seldims(r, j, k))
                 end
             end
         end
@@ -92,8 +99,8 @@ op_mm = TensorOperator(;
 
 op_conv = TensorOperator(;
     symbol_name = :conv,
-    op! = function(res::AbstractArray{T,N}, l, r) where {T,N}
-        res .= rand(size(res)...)
+    op! = function(res, l, r)
+        # res .= rand(size(res)...)
     end,
     gradient! = function(res, dres, l, dl, r, dr, ::Val{comp}) where {comp}
         # TODO: implement this and op!
@@ -109,11 +116,12 @@ op_conv = TensorOperator(;
 
 op_T = TensorOperator(;
     symbol_name = :T,
-    op! = function(res::AbstractArray{T,N}, l) where {T,N}
-        permutedims!(res, l, ntuple(i -> i<3 ? 3-i : i, Val(N)))
+    op! = function(res, l)
+        #permutedims!(res, l, ntuple(i -> i<3 ? 3-i : i, Val(N)))
+        # TODO: implement this
     end,
     gradient! = function(res, dres, l, dl)
-        permutedims!(dl, dres, ntuple(i -> i<3 ? 3-i : i, Val(N)))
+        #permutedims!(dl, dres, ntuple(i -> i<3 ? 3-i : i, Val(N)))
     end,
     push_constraints! = function(cs, (resoff, loff), ::Val{N}) where {N}
         push!(cs, @make_constraint((resoff+1, resoff+2, loff+1, loff+2), (n, m, m, n)))
@@ -224,9 +232,11 @@ buffer = Vector{Float32}(undef, 1000_000)
 # the inputs, with the labels at the end
 # cX = [x1|x2|x3|y]
 B = 3_000
+println("Making cX")
 cX = flatten(Vector{Float32}, [rand(Float32, B, 4, 1, 1), rand(Float32, B, 4, 1, 1), rand(Float32, B, 4, 1, 1), rand(Float32, B, 4, 1, 1)])
 
 # the result of the operation will be computed here (if you don't compute the derivative)
+println("Making results ftl")
 results = flatten(Vector{Float32}, [rand(Float32, B, 4, 1, 1)])
 
 # the constants that are used in the expression
@@ -234,14 +244,19 @@ results = flatten(Vector{Float32}, [rand(Float32, B, 4, 1, 1)])
 
 # infers the shapes and puts them into the tree
 # later this will have a specific shape generator
+println("Making results constants ftl")
 constants = flatten(Vector{Float32}, [rand(Float32, 2, 4, 1, 1), rand(Float32, 2, 4, 1, 1)])
+println("Running shape inference")
 shape_inference(trees[5], operators, cX)
+println("Recalculating node values")
 recalculate_node_values!(trees[5], constants)
+println("Reshaping node constants to desired value")
 constants = reshape_constants(trees[5], constants)
+println("The tree is:\n", string_debug_tree(trees[5]))
 
 reducer_op = op_loss
 
-# eval_diff_tree_array_cpu(trees[5], constants, operators,  cX, reducer_op,       buffer)
+eval_diff_tree_array_cpu(trees[5], constants, operators,  cX, reducer_op,       buffer)
 
 # B = 11
 # while B < 40_000
@@ -290,3 +305,4 @@ reducer_op = op_loss
 # the derivatives with respect to the final scalar are also written into the second sample in the constants ftl
 # eval_diff_tree_array_cpu(trees[5], constants, operators,  cX, reducer_op,       buffer)
 
+nothing

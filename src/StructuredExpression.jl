@@ -62,7 +62,7 @@ struct StructuredExpression{
     E<:AbstractExpression{T,N},
     TS<:NamedTuple{<:Any,<:NTuple{<:Any,E}},
     D<:@NamedTuple{structure::F, operators::O, variable_names::V, extra::EX} where {O,V},
-} <: AbstractExpression{T,N,0}
+} <: AbstractExpression{T,N}
     trees::TS
     metadata::Metadata{D}
 

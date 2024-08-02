@@ -10,6 +10,7 @@ using DispatchDoctor: @stable, @unstable
     include("OperatorEnum.jl")
     include("Node.jl")
     include("NodeUtils.jl")
+    include("TensorNodeUtils.jl")
     include("ShapeInference.jl")
     include("Strings.jl")
     include("Evaluate.jl")

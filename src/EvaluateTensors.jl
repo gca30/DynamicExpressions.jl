@@ -3,7 +3,10 @@ module EvaluateTensorsModule
 
 using ..FlattenedTensorListModule:
     FlattenedTensorList,
-    treat_as_flattened
+    treat_as_flattened,
+    sample_flat,
+    mapself_ti!,
+    feature
 using ..NodeModule:
     AbstractNode,
     AbstractExprNode,
@@ -11,7 +14,7 @@ using ..NodeModule:
 using ..OperatorEnumModule:
     TensorOperatorEnum,
     TensorOperator
-using ..NodeUtilsModule:
+using ..TensorNodeUtilsModule:
     buffer_count_with_gradients,
     make_ftl_from_tree
 using ..StringsModule:
@@ -51,11 +54,11 @@ using ..StringsModule:
 # macro to be only used in the implementations of these functions
 macro valsrc(node)
     return quote if $(esc(node)).degree == 0 && $(esc(node)).constant
-        $(esc(:constants))[$(esc(node)).feature, 1]
+        $(esc(:feature))($(esc(:constants)), $(esc(node)).feature, $(esc(:i)))
     elseif $(esc(node)).degree == 0
-        $(esc(:cX))[$(esc(node)).feature, $(esc(:batch_offset))+$(esc(:i))]
+        $(esc(:feature))($(esc(:cX)), $(esc(node)).feature, $(esc(:batch_offset))+$(esc(:i)))
     else
-        $(esc(:temp))[$(esc(node)).feature, $(esc(:i))]
+        $(esc(:feature))($(esc(:temp)), $(esc(node)).feature, $(esc(:i)))
     end end
 end
 
@@ -68,14 +71,14 @@ end
     batch_offset::Integer, batch_len,
 ) where {T,N,NB,BINOPS,NU,UNAOPS}
     return quote
-        println(string_debug_tree(node.l))
+        # println(string_debug_tree(node.l))
         Base.Cartesian.@nif(
             $NU,
             opix -> opix == node.op,
             opix -> let top = operators.unaops[opix]
                 for i in 1:batch_len
                     top.op!(
-                        temp[node.feature, i], # res
+                        feature(temp, node.feature, i), # res
                         @valsrc(node.l) # left
                     )
                 end
@@ -102,7 +105,7 @@ end
             opix -> let top = operators.binops[opix]
                 for i in 1:batch_len
                     top.op!(
-                        temp[node.feature, i], # res
+                        feature(temp, node.feature, i), # res
                         @valsrc(node.l), # left
                         @valsrc(node.r) # right
                     )
@@ -220,19 +223,19 @@ function _eval_diff_tree_array_cpu(
 
         # reducer operator forward evaluation
         reducer_op.op!(
-            temp[1, i], # res
+            feature(temp,1, i), # res
             @valsrc(tree), # left
-            cX[length(cX.positions), batch_offset+i] # right
+            feature(cX, length(cX.positions), batch_offset+i) # right
         )
         result += temp[1, i][1]
 
         # reducer operator gradient evaluation
         if tree.constant
             reducer_op.gradient!(
-                temp[1, i], # res
+                feature(temp, 1, i), # res
                 @valsrc(tree.l), # left
-                temp[tree.grad_ix, i], # dleft
-                cX[length(cX.positions), batch_offset+i] # right
+                feature(temp, tree.grad_ix, i), # dleft
+                feature(cX, length(cX.positions), batch_offset+i) # right
             )
         end
     end
@@ -259,9 +262,7 @@ function eval_diff_tree_array_cpu(
     # display(output)
     # println()
 
-    for i in eachindex(constants.positions)
-        @. constants[i, 2] = zero(T)
-    end
+    mapself_ti!(Returns(zero(IXT)), sample_flat(constants, 2))
 
     result = zero(T)
     for i in 1:div(cX.B + output.B-1, output.B)
