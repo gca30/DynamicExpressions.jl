@@ -259,16 +259,13 @@ reducer_op = op_loss
 eval_diff_tree_array_cpu(trees[5], constants, operators,  cX, reducer_op,       buffer)
 
 B = 11
-while B < 40_000
+
+function redo_thing()
     global B
     global cX
     global results
     global constants
-    if B < 1000
-        B = Int32(floor(B*1.1))
-    else
-        B = Int32(floor(B*1.05))
-    end
+    
     cX = flatten(Vector{Float32}, [rand(Float32, B, 4, 1, 1), rand(Float32, B, 4, 1, 1), rand(Float32, B, 4, 1, 1), rand(Float32, B, 4, 1, 1)])
 
     # the result of the operation will be computed here (if you don't compute the derivative)
@@ -286,6 +283,23 @@ while B < 40_000
 
     print(B, " ")
     @time eval_diff_tree_array_cpu(trees[5], constants, operators,  cX, reducer_op,       buffer)
+end
+
+if true
+    global B
+    B = 40_000
+    #redo_thing()
+else
+    global B
+    while B < 40_000
+        B = 11
+        if B < 1000
+            B = Int32(floor(B*1.1))
+        else
+            B = Int32(floor(B*1.05))
+        end
+        redo_thing()
+    end
 end
 
 # SOMETIMES THIS WHOLE THING DOESN'T WORK BECAUSE SHAPE_INFERENCE IS NOT DETERMINISTIC :'(
