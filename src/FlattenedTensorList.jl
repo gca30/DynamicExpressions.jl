@@ -59,6 +59,13 @@ end
 
 @inline Base.axes(ti::TensorIndex, dim::Integer) = 1:(ti.shape[dim])
 
+@inline function ti_from_array(x::AT) where {T,N,AT<:AbstractArray{T,N}}
+    return TensorIndex{Int32,N,T,typeof(x[:])}(copy(@view(x[:])), 0, size(x), begin
+        acum = 1
+        ntuple(i -> i == 1 ? 1 : (acum *= size(x, i-1)), Val(N))
+    end)
+end
+
 @inline function feature(ftl::FlattenedTensorList{T,N,IXT,AT}, fi::Integer) where {T,N,IXT,AT}
     return TensorIndex{IXT,N+1,T,AT}(ftl.flattened, ftl.positions[fi].offset, (ftl.positions[fi].shape..., ftl.B), (ftl.positions[fi].strides..., ftl.L))
 end
@@ -75,7 +82,7 @@ end
     return TensorIndex{IXT,1,T,AT}(ftl.flattened, ftl.L*(bi-1) + ftl.positions[fi].offset, (ftl.positions[fi].len,), (1,))
 end
 
-@inline function feature(ftl::FlattenedTensorList{T,N,IXT,AT}, fi::Integer, bi::Integer) where {T,N,IXT,AT}
+function feature(ftl::FlattenedTensorList{T,N,IXT,AT}, fi::Integer, bi::Integer) where {T,N,IXT,AT}
     return TensorIndex{IXT,N,T,AT}(ftl.flattened, ftl.positions[fi].offset + ftl.L * convert(IXT, bi-1), ftl.positions[fi].shape, ftl.positions[fi].strides)
 end
 
@@ -92,7 +99,7 @@ end
 end
 
 @inline function value(tix::TensorIndex{IXT,N,T}, ixs::Vararg{Integer,N}) where {T,IXT,N}
-    return @inbounds tix.ar[sum(ntuple(nx -> (ixs[nx]-1) * tix.strides[nx], Val(N))) + tix.offset + 1]
+    return  tix.ar[sum(ntuple(nx -> (ixs[nx]-1) * tix.strides[nx], Val(N))) + tix.offset + 1]
 end
 
 @inline function indices(tix::TensorIndex{IXT,N,T}, i::Integer) where {T,IXT,N}
@@ -108,8 +115,12 @@ end
     return sum(ntuple(nx -> (ixs[nx]-1) * tix.strides[nx], Val(N))) + tix.offset + 1
 end
 
+@inline function index_clamp(tix::TensorIndex{IXT,N,T}, ixs::Vararg{IXT, N}) where {T,IXT,N}
+    return sum(ntuple(nx -> ixs[nx] > tix.shape[nx] ? 0 : (ixs[nx]-1) * tix.strides[nx], Val(N))) + tix.offset + 1
+end
+
 @inline function selectdim_ti(tix::TensorIndex{IXT,N,T}, dim::Integer, i::Integer) where {T,IXT,N}
-    return TensorIndex(tix.ar, convert(IXT, tix.offset + convert(IXT, i-1)*tix.strides[dim]), ntuple(nx -> nx == dim ? one(IXT) : tix.shape[nx], Val(N)), tix.strides)
+    return TensorIndex(tix.ar, tix.offset + convert(IXT, i-1)*tix.strides[dim], ntuple(nx -> nx == dim ? one(IXT) : tix.shape[nx], Val(N)), tix.strides)
 end
 
 @inline function selectdim_ti(tix::TensorIndex{IXT,N,T}, dim::Integer, ir::UnitRange{<:Integer}) where {T,IXT,N}
@@ -117,6 +128,43 @@ end
     tix.offset + convert(IXT, ir.start-1)*tix.strides[dim], 
     ntuple(nx -> nx == dim ? convert(IXT, ir.stop - ir.start + 1) : tix.shape[nx], Val(N)), 
     tix.strides)
+end
+
+using StaticArrays
+
+function mapk_ti!(op::F, dest::TensorIndex{IXT,N}, sources::Vararg{TensorIndex{IXT,N}, K}) where {F,IXT,N,K}
+
+    itershape = ntuple(nx -> max(dest.shape[nx], maximum(source -> source.shape[nx], sources; init=0)), Val(N))
+    iterlen = prod(itershape)
+    ii = MVector{N,IXT}(ntuple(Returns(1), Val(N))...)
+    sinar = MVector{K,IXT}(ntuple(kx -> sources[kx].offset+1, Val(K)))    
+    # @show itershape
+
+    for i in 1:iterlen
+
+        nx = 1
+        while ii[nx] > itershape[nx]
+            ii[nx+1] += 1
+            ii[nx] = 1
+            nx+=1
+        end
+        dinar = index_clamp(dest, ii...)
+        for kx in 1:K
+            sinar[kx] = index_clamp(sources[kx], ii...)
+        end
+        # @show dinar
+        # @show sinar
+        # @show ii
+        ii[1] += 1
+
+        dest.ar[dinar] = op(
+            (dest.ar[dinar]),
+            ntuple(kx -> (sources[kx].ar[sinar[kx]]), Val(K))...
+        )
+        
+    end
+    return nothing
+
 end
 
 function _copy_ti_simple!(op::F, dest::TensorIndex{IXT,N}, source::TensorIndex{IXT,N}) where {IXT,N,F}
@@ -137,16 +185,14 @@ function _copy_ti_simple!(op::F, dest::TensorIndex{IXT,N}, source::TensorIndex{I
         while di[nx] > dest.shape[nx]
             di[nx+1] += 1
             di[nx] = 1
-            dinar += @inbounds doffjump[nx]
-            sinar += @inbounds soffjump[nx]
+            dinar +=  doffjump[nx]
+            sinar +=  soffjump[nx]
             nx += 1
         end
-        @inbounds dest.ar[dinar] = op(@inbounds source.ar[sinar])
+         dest.ar[dinar] = op( source.ar[sinar])
     end
     return nothing
 end
-
-using StaticArrays
 
 function _copy_ti_views(op::F, dest::TensorIndex{IXT,N}, source::TensorIndex{IXT,N}, viewdims::Integer) where {IXT,N,F}
     iterlen = 1
@@ -169,7 +215,7 @@ function _copy_ti_views(op::F, dest::TensorIndex{IXT,N}, source::TensorIndex{IXT
     while i < iterlen
         i += 1
         for j in 1:viewlen
-            @inbounds dest.ar[dinar+j] = op(@inbounds source.ar[sinar+j])
+             dest.ar[dinar+j] = op( source.ar[sinar+j])
         end
         
         dinar += dest.strides[viewdims]
@@ -179,8 +225,8 @@ function _copy_ti_views(op::F, dest::TensorIndex{IXT,N}, source::TensorIndex{IXT
         while di[nx] > dest.shape[nx]
             di[nx+1] += 1
             di[nx] = 1
-            dinar += @inbounds doffjump[nx]
-            sinar += @inbounds soffjump[nx]
+            dinar +=  doffjump[nx]
+            sinar +=  soffjump[nx]
             nx += 1
         end
     end
@@ -201,7 +247,7 @@ function copy_ti!(op::F, dest::TensorIndex{IXT,N}, source::TensorIndex{IXT,N}) w
     if cd == 0
         _copy_ti_simple!(op, dest, source)
     elseif cd == N
-        @inbounds @view(dest.ar[dest.offset:(dest.offset+length(dest))]) .= op.(@inbounds @view(source.ar[source.offset:(source.offset+length(dest))]))
+         @view(dest.ar[dest.offset:(dest.offset+length(dest))]) .= op.( @view(source.ar[source.offset:(source.offset+length(dest))]))
     else
         _copy_ti_views(op, dest, source, cd)
     end
@@ -213,7 +259,7 @@ function copy_ti!(dest::TensorIndex{IXT,N}, source::TensorIndex{IXT,N}) where {I
     if cd == 0
         _copy_ti_simple!(identity, dest, source)
     elseif cd == N
-        @inbounds @view(dest.ar[dest.offset:(dest.offset+l)]) .= @inbounds @view(source.ar[source.offset:(source.offset+l)])
+         @view(dest.ar[dest.offset:(dest.offset+l)]) .=  @view(source.ar[source.offset:(source.offset+l)])
     else
         _copy_ti_views(identity, dest, source, cd)
     end
@@ -229,24 +275,34 @@ end
 # still a 15x improvement, but not compared to the 80x improvement for raw arrays
 function _map2b_ti!(op::F, dest::TensorIndex{IXT,N}, lterm::TensorIndex{IXT,N}, rterm::TensorIndex{IXT,N}) where {IXT,N,F}
 
-    len = length(dest)
-    di = MVector{N,IXT}(ntuple(Returns(1), Val(N))...)
-    doffjump = ntuple(nx -> nx == 1 ? dest.strides[1] : dest.strides[nx] - dest.shape[nx-1]*dest.strides[nx-1], Val(N))
+    itershape = ntuple(nx -> max(dest.shape[nx], lterm.shape[nx], rterm.shape[nx]), Val(N))
+    len = prod(itershape)
+
+    ii = MVector{N,IXT}(ntuple(Returns(1), Val(N))...)
+    doffjump = ntuple(nx -> if nx == 1
+        itershape[1] == dest.shape[1] ? dest.strides[1] : 0 # iteration stride
+    elseif itershape[nx-1] != dest.shape[nx-1]
+        dest.strides[nx-1] # if the previous overflown axis was broadcasted, you need to advance to the next element
+    elseif itershape[nx] == dest.shape[nx]
+        dest.strides[nx] - dest.shape[nx-1]*dest.strides[nx-1] # from the overflown last element to the next first element
+    else
+        -dest.shape[nx-1]*dest.strides[nx-1] # if you overflow into a broadcasted axis, go back to 1
+    end, Val(N))
     loffjump = ntuple(nx -> if nx == 1
-        dest.shape[1] == lterm.shape[1] ? lterm.strides[1] : 0 # iteration stride
-    elseif dest.shape[nx-1] != lterm.shape[nx-1]
+        itershape[1] == lterm.shape[1] ? lterm.strides[1] : 0 # iteration stride
+    elseif itershape[nx-1] != lterm.shape[nx-1]
         lterm.strides[nx-1] # if the previous overflown axis was broadcasted, you need to advance to the next element
-    elseif dest.shape[nx] == lterm.shape[nx]
+    elseif itershape[nx] == lterm.shape[nx]
         lterm.strides[nx] - lterm.shape[nx-1]*lterm.strides[nx-1] # from the overflown last element to the next first element
     else
         -lterm.shape[nx-1]*lterm.strides[nx-1] # if you overflow into a broadcasted axis, go back to 1
     end, Val(N))
 
     roffjump = ntuple(nx -> if nx == 1
-        dest.shape[1] == rterm.shape[1] ? rterm.strides[1] : 0
-    elseif dest.shape[nx-1] != rterm.shape[nx-1]
+        itershape[1] == rterm.shape[1] ? rterm.strides[1] : 0
+    elseif itershape[nx-1] != rterm.shape[nx-1]
         rterm.strides[nx-1]
-    elseif dest.shape[nx] == rterm.shape[nx]
+    elseif itershape[nx] == rterm.shape[nx]
         rterm.strides[nx] - rterm.shape[nx-1]*rterm.strides[nx-1]
     else
         -rterm.shape[nx-1]*rterm.strides[nx-1]
@@ -261,18 +317,18 @@ function _map2b_ti!(op::F, dest::TensorIndex{IXT,N}, lterm::TensorIndex{IXT,N}, 
         i += 1
 
         nx = 1
-        while di[nx] > dest.shape[nx]
-            di[nx+1] += 1
-            di[nx] = 1
+        while ii[nx] > itershape[nx]
+            ii[nx+1] += 1
+            ii[nx] = 1
             dinar += doffjump[nx+1]
             rinar += roffjump[nx+1]
             linar += loffjump[nx+1]
             nx += 1
         end
         
-        @inbounds dest.ar[dinar] = op((@inbounds lterm.ar[linar]), (@inbounds rterm.ar[rinar]))
+         dest.ar[dinar] = op(( dest.ar[dinar]), ( lterm.ar[linar]), ( rterm.ar[rinar]))
 
-        di[1] += 1
+        ii[1] += 1
         dinar += doffjump[1]
         linar += loffjump[1]
         rinar += roffjump[1]
@@ -302,33 +358,38 @@ function _map2nbv_ti!(op::F, dest::TensorIndex{IXT,N}, lterm::TensorIndex{IXT,N}
     doffjump = ntuple(nx -> dest.strides[nx+1] - dest.shape[nx]*dest.strides[nx], Val(N-1))
     loffjump = ntuple(nx -> lterm.strides[nx+1] - lterm.shape[nx]*lterm.strides[nx], Val(N-1))
     roffjump = ntuple(nx -> rterm.strides[nx+1] - rterm.shape[nx]*rterm.strides[nx], Val(N-1))
-    di[viewdims] = 0
     dinar = dest.offset
     linar = lterm.offset
     rinar = rterm.offset
     i = 0
     while i < iterlen
         i += 1
-        for j in 1:viewlen
-            @inbounds dest.ar[dinar+j] = op(
-                (@inbounds lterm.ar[linar+j]),
-                (@inbounds rterm.ar[rinar+j])
-            )
-        end
-        
-        dinar += dest.strides[viewdims]
-        linar += lterm.strides[viewdims]
-        rinar += rterm.strides[viewdims]
-        di[viewdims] += 1
         nx = viewdims
         while di[nx] > dest.shape[nx]
             di[nx+1] += 1
             di[nx] = 1
-            dinar += @inbounds doffjump[nx]
-            linar += @inbounds loffjump[nx]
-            rinar += @inbounds roffjump[nx]
+            dinar +=  doffjump[nx]
+            linar +=  loffjump[nx]
+            rinar +=  roffjump[nx]
             nx += 1
         end
+
+        for j in 1:viewlen
+             dest.ar[dinar+j] = op(
+                ( dest.ar[dinar+j]),
+                ( lterm.ar[linar+j]),
+                ( rterm.ar[rinar+j])
+            )
+        end
+        
+        dinar += dest.strides[viewdims]
+        if dinar - dest.offset < 300
+            @show di, dinar, linar, rinar
+        end
+        linar += lterm.strides[viewdims]
+        rinar += rterm.strides[viewdims]
+        di[viewdims] += 1
+        
     end
     return nothing
 end
@@ -341,14 +402,47 @@ function map2_ti!(op::F, dest::TensorIndex{IXT,N}, lterm::TensorIndex{IXT,N}, rt
             B = @view(lterm.ar[(lterm.offset+1):(lterm.offset+length(lterm))])
             C = @view(rterm.ar[(rterm.offset+1):(rterm.offset+length(rterm))])
             for i in 1:length(A)
-                A[i] = op(B[i], C[i])
+                A[i] = op(A[i], B[i], C[i])
             end
             #@. A = op(B,C)
         else
+            println("_map2nbv_ti!")
             _map2nbv_ti!(op, dest, lterm, rterm, cd)
         end
     else
+        println("_map2b_ti!")
         _map2b_ti!(op, dest, lterm, rterm)
+    end
+end
+
+function reducedim_ti!(op::F, reduce_op::Fr, dest::TensorIndex{IXT,N,T}, source::TensorIndex{IXT,N}) where {IXT,N,T,F,Fr}
+    len = length(dest)
+    si = MVector{N,IXT}(ntuple(Returns(1), Val(N))...)
+    doffjump = ntuple(nx -> nx == 1 ? dest.strides[1] : dest.strides[nx] - dest.shape[nx-1]*dest.strides[nx-1], Val(N))
+    soffjump = ntuple(nx -> nx == 1 ? source.strides[1] : source.strides[nx] - source.shape[nx-1]*source.strides[nx-1], Val(N))
+    
+    dinar = dest.offset+1
+    sinar = source.offset+1
+ 
+    i = 0
+    while i < len
+        i += 1
+
+        nx = 1
+        while si[nx] > source.shape[nx]
+            si[nx+1] += 1
+            si[nx] = 1
+            sinar += soffjump[nx+1]
+            nx += 1
+        end
+        
+         dest.ar[dinar] = reduce_op(( dest.ar[dinar]), ( source.ar[sinar]))
+
+        si[1] += 1
+        dinar += doffjump[1]
+        linar += loffjump[1]
+        rinar += roffjump[1]
+        
     end
 end
 
@@ -378,8 +472,8 @@ function mapreduce2nb_ti!(op::F, reduce_op::Fr, startr::T, lterm::TensorIndex{IX
         while di[nx] > lterm.shape[nx]
             di[nx+1] += 1
             di[nx] = 1
-            linar += @inbounds loffjump[nx]
-            rinar += @inbounds roffjump[nx]
+            linar +=  loffjump[nx]
+            rinar +=  roffjump[nx]
             nx += 1
         end
     end
@@ -393,32 +487,54 @@ function mapnb_ti!(op::F, dest::TensorIndex{IXT,N}, terms::Vararg{TensorIndex{IX
     di = MVector{N,IXT}(ntuple(Returns(1), Val(N))...)
     doffjump = NTuple{N-1, IXT}(ntuple(nx -> dest.strides[nx+1] - dest.shape[nx]*dest.strides[nx], Val(N-1)))
     toffjump = NTuple{M, NTuple{N-1, IXT}}(ntuple(mx -> ntuple(nx -> terms[mx].strides[nx+1] - terms[mx].shape[nx]*terms[mx].strides[nx], Val(N-1)), Val(M)))
+    # @show doffjump
+    # @show dest.strides
+    # @show map(t -> t.strides, terms)
+    # @show toffjump
     tinar = MVector{M,IXT}(ntuple(mx -> terms[mx].offset+1, Val(M))...)
     dinar = IXT(dest.offset+1)
     i = 0
 
     while true
         i += 1
-        @inbounds dest.ar[dinar] = op(ntuple(mx -> (@inbounds terms[mx].ar[@inbounds tinar[mx]]), Val(M))...)
+         dest.ar[dinar] = op(( dest.ar[dinar]), ntuple(mx -> ( terms[mx].ar[ tinar[mx]]), Val(M))...)
         
         if i >= iterlen
             break
         end
 
         for mx in 1:M
-            @inbounds tinar[mx] += @inbounds terms[mx].strides[1]
+            tinar[mx] +=  terms[mx].strides[1]
         end
         dinar += dest.strides[1]
         di[1] += 1
         nx = one(IXT)
-        while @inbounds di[nx] > dest.shape[nx]
-            @inbounds di[nx+1] += 1
-            @inbounds di[nx] = 1
+        while  di[nx] > dest.shape[nx]
+             di[nx+1] += 1
+             di[nx] = 1
             for mx in 1:M
-                @inbounds tinar[mx] += @inbounds toffjump[mx][nx]
+                tinar[mx] +=  toffjump[mx][nx]
             end
-            dinar += @inbounds doffjump[nx]
+            dinar +=  doffjump[nx]
             nx += 1
+        end
+        # @show di
+
+        @assert dinar == index(dest, di...)
+        for mx in 1:M
+          #  @show mx
+            if tinar[mx] != index(terms[mx], di...)
+                @show tinar[mx]
+                @show di
+                @show dest.shape
+                @show toffjump[mx]
+                @show mx
+                @show terms[mx].shape
+                @show terms[mx].offset
+                @show terms[mx].strides
+                @show index(terms[mx], di...)
+                error("MISMATCH")
+            end
         end
     end
     return nothing
@@ -445,10 +561,10 @@ function materialize_ti(source::TensorIndex{IXT,N,T,AT}) where {IXT,N,T,AT}
             if si[nx] > source.shape[nx]
                 si[nx+1] += 1
                 si[nx] = 1
-                sinar += @inbounds source.strides[nx+1] - source.shape[nx]*source.strides[nx]
+                sinar +=  source.strides[nx+1] - source.shape[nx]*source.strides[nx]
             end
         end
-        @inbounds v[si...] = @inbounds source.ar[sinar]
+         v[si...] =  source.ar[sinar]
     end
     return v
 end
@@ -467,7 +583,7 @@ function treat_as_flattened(buff::AT, sizes::AbstractVector{NTuple{N, IXT}}, max
     return FlattenedTensorList{T,N,IXT,AT,Vector{FTLPositionInfo{IXT,N}}}(b, l, buff, positions)
 end
 
-function flatten(::Type{AT}, X::AbstractVector{<:AbstractArray{T,NP1}}; IXT=Int32) where {T,NP1,AT<:AbstractArray}
+function flatten(::Type{AT}, X::AbstractVector{<:AbstractArray{T,NP1}}; index_type::Val{IXT}=Val(Int32)) where {IXT,T,NP1,AT<:AbstractArray}
     N = NP1-1
     B = size(X[1], 1)
     l = sum(Xi -> div(length(Xi), B), X)

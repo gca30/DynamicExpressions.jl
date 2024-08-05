@@ -19,6 +19,7 @@ import ..FlattenedTensorListModule:
     treat_as_flattened,
     feature_flat,
     copy_ti!,
+    mapk_ti!,
     selectdim_ti
 using ..NodeUtilsModule:
     count_constant_nodes,
@@ -164,21 +165,21 @@ function reshape_constants(tree::AbstractTensorExprNode{T,N}, constants::Flatten
         old_shape = constants.positions[ci].shape 
         old_len = constants.positions[ci].len
         if new_shape == old_shape
-            copy_ti!(feature(consts2, ci), feature(constants, ci))
+            mapk_ti!((_,b)->b, feature(consts2, ci), feature(constants, ci))
         elseif new_len == old_len
-            copy_ti!(feature_flat(consts2, ci), feature_flat(constants, ci))
+            mapk_ti!((_,b)->b, feature_flat(consts2, ci), feature_flat(constants, ci))
         elseif new_len < old_len
-            copy_ti!(feature_flat(consts2, ci), selectdim_ti(feature_flat(constants, ci), 1:new_len))
+            mapk_ti!((_,b)->b, feature_flat(consts2, ci), selectdim_ti(feature_flat(constants, ci), 1:new_len))
         else
             off = 0
             while off <= new_len
                 if off+old_len > new_len
-                    copy_ti!(
+                    mapk_ti!((_,b)->b, 
                         selectdim_ti(feature_flat(consts2, ci), 1, (off+1):(new_len)), 
                         selectdim_ti(feature_flat(constants, ci), 1, 1:(new_len-off))
                     )
                 else
-                    copy_ti!(
+                    mapk_ti!((_,b)->b, 
                         selectdim_ti(feature_flat(consts2, ci), 1, (off+1):(off+old_len)), 
                         feature_flat(constants, ci)
                     )

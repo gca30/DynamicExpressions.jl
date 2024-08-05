@@ -8,10 +8,12 @@ using DynamicExpressions.FlattenedTensorListModule:
     map2_ti!,
     mapreduce2nb_ti!,
     copy_ti!,
-    mapnb_ti!,
+    mapnb_ti!, map2_ti!,
+    mapk_ti!,
     mapself_ti!,
     TensorIndex,
-    selectdim_ti
+    selectdim_ti,
+    materialize_ti
 using DynamicExpressions.OperatorEnumConstructionModule
 using DynamicExpressions.OperatorEnumConstructionModule: broadcast_binop, broadcast_unaop, @extend_operators
 using DynamicExpressions.ShapeInferenceModule
@@ -34,11 +36,15 @@ woaw(x) = x^2-5*x+9
 
 op_loss = TensorOperator(;
     symbol_name = :loss,
-    op! = function(res::TensorIndex{IXT,N,T}, l, r) where {IXT,N,T}
-        res.ar[res.offset+1] = mapreduce2nb_ti!((l, r) -> (l-r)^2, +, zero(T), l, r)
+    op! = function(res::TensorIndex{IXT,NP1,T}, l, r) where {IXT,NP1,T}
+        #for bx in 1:res.shape[NP1]
+        #r2 = selectdim_ti(res, NP1, bx)
+        mapk_ti!(Returns(zero(IXT)), res)
+        mapk_ti!((rest, lt, rt) -> rest+(lt-rt)^2, res, l, r)
+        #end
     end,
     gradient! = function(res, l, dl, r)
-        map2_ti!((l, r) -> 2*(l-r), res, l, r)
+        mapk_ti!((dlt, lt, rt) -> 2*(lt-rt), dl, l, r)
     end,
     push_constraints! = function(cs, (resoff, loff, roff), ::Val{N}) where {N}
         for nx in 1:N
@@ -52,38 +58,44 @@ op_loss = TensorOperator(;
 
 op_mm = TensorOperator(;
     symbol_name = :mm,
-    op! = function(res::TensorIndex{IXT,N,T}, l, r) where {IXT,N,T}
+    op! = function(res::TensorIndex{IXT,NP1,T}, l, r) where {IXT,NP1,T}
         # @show size(res)
         # @show size(l)
         # @show size(r)
+        mapk_ti!(Returns(zero(T)), res)
         for i in axes(l, 1), j in axes(r, 2)
-            # @show i, j
-            mapself_ti!(Returns(zero(T)), seldims(res, i, j))
+            #@show i, j
             for k in axes(l, 2)
-                # @show i, j, k
+             #   @show i, j, k
                 # @show selectdim(selectdim(res, 1, i), 1, j)
                 # @show selectdim(selectdim(l, 1, i), 1, k)
                 # @show selectdim(selectdim(r, 1, k), 1, j)
-                mapnb_ti!((d, l, r) -> d+l*r, seldims(res, i, j), seldims(res, i, j), seldims(l, i, k), seldims(r, k, j))
+                # @show seldims(res, i, j).shape
+                # @show seldims(l, i, k).shape
+                # @show seldims(r, k, j)
+                #@show "before", materialize_ti(selectdim_ti(res, NP1, 1:10))
+                mapk_ti!((d, l, r) -> d+l*r, seldims(res, i, j), seldims(l, i, k), seldims(r, k, j))
+                #@show "after", materialize_ti(selectdim_ti(res, NP1, 1:10))
             end
         end
+        #@show materialize_ti(selectdim_ti(res, NP1, 1:100))
     end,
     gradient! = function(res::TensorIndex{IXT,N,T}, dres, l, dl, r, dr, ::Val{comp}) where {comp,IXT,N,T}
         if comp & 0b01 != 0 # right
             # DR = L^T DRES
+            mapk_ti!(Returns(zero(T)), dr)
             for i in axes(dr, 1), j in axes(dr, 2)
-                mapself_ti!(Returns(zero(T)), seldims(dr, i, j))
                 for k in axes(dres, 1)
-                    mapnb_ti!((d, l, r) -> d+l*r, seldims(dr, i, j), seldims(dr, i, j), seldims(l, k, i), seldims(dres, k, j))
+                    mapk_ti!((d, l, r) -> d+l*r, seldims(dr, i, j), seldims(l, k, i), seldims(dres, k, j))
                 end
             end
         end
         if comp & 0b10 != 0 # left
             # DL = DRES R^T
+            mapk_ti!(Returns(zero(T)), dl)
             for i in axes(dl, 1), j in axes(dl, 2)
-                mapself_ti!(Returns(zero(T)), seldims(dl, i, j))
                 for k in axes(dres, 2)
-                    mapnb_ti!((d, l, r) -> d+l*r, seldims(dl, i, j), seldims(dl, i, j), seldims(dres, i, k), seldims(r, j, k))
+                    mapk_ti!((d, l, r) -> d+l*r, seldims(dl, i, j), seldims(dres, i, k), seldims(r, j, k))
                 end
             end
         end
@@ -231,13 +243,13 @@ buffer = Vector{Float32}(undef, 1000_000)
 
 # the inputs, with the labels at the end
 # cX = [x1|x2|x3|y]
-B = 3_000
+BBB = 3_000
 println("Making cX")
-cX = flatten(Vector{Float32}, [rand(Float32, B, 4, 1, 1), rand(Float32, B, 4, 1, 1), rand(Float32, B, 4, 1, 1), rand(Float32, B, 4, 1, 1)])
+cX = flatten(Vector{Float32}, [rand(Float32, BBB, 4, 1, 1), rand(Float32, BBB, 4, 1, 1), rand(Float32, BBB, 4, 1, 1), rand(Float32, BBB, 4, 1, 1)])
 
 # the result of the operation will be computed here (if you don't compute the derivative)
 println("Making results ftl")
-results = flatten(Vector{Float32}, [rand(Float32, B, 4, 1, 1)])
+results = flatten(Vector{Float32}, [rand(Float32, BBB, 4, 1, 1)])
 
 # the constants that are used in the expression
 # the first is the sample is the actual value and the second is the to-be-computed derivative
@@ -258,18 +270,21 @@ reducer_op = op_loss
 
 eval_diff_tree_array_cpu(trees[5], constants, operators,  cX, reducer_op,       buffer)
 
-B = 11
+BBB = 11
 
 function redo_thing()
-    global B
+    # global BBB
     global cX
-    global results
+    # global results
     global constants
-    
-    cX = flatten(Vector{Float32}, [rand(Float32, B, 4, 1, 1), rand(Float32, B, 4, 1, 1), rand(Float32, B, 4, 1, 1), rand(Float32, B, 4, 1, 1)])
+    # global buffer
+
+    #println("OK, now we start")
+    buffer .= 666
+    cX = flatten(Vector{Float32}, [rand(Float32, BBB, 4, 1, 1), rand(Float32, BBB, 4, 1, 1), rand(Float32, BBB, 4, 1, 1), rand(Float32, BBB, 4, 1, 1)])
 
     # the result of the operation will be computed here (if you don't compute the derivative)
-    results = flatten(Vector{Float32}, [rand(Float32, B, 4, 1, 1)])
+    # results = flatten(Vector{Float32}, [rand(Float32, BBB, 4, 1, 1)])
 
     # the constants that are used in the expression
     # the first is the sample is the actual value and the second is the to-be-computed derivative
@@ -281,29 +296,32 @@ function redo_thing()
     recalculate_node_values!(trees[5], constants)
     constants = reshape_constants(trees[5], constants)
 
-    print(B, " ")
+    #println("OK, now we run")
+    print(BBB, " ")
     @time eval_diff_tree_array_cpu(trees[5], constants, operators,  cX, reducer_op,       buffer)
 end
 
-if true
-    global B
-    B = 40_000
-    #redo_thing()
-else
-    global B
-    while B < 40_000
-        B = 11
-        if B < 1000
-            B = Int32(floor(B*1.1))
+BBB = 11
+
+# if false
+#     buffer .= 666
+#     BBB = 40_000
+#     #redo_thing()
+# else
+    BBB = Int32(11)
+    while BBB < 40_000
+        global BBB
+        if BBB < 1000
+            BBB = Int32(floor(BBB*1.1))
         else
-            B = Int32(floor(B*1.05))
+            BBB = Int32(floor(BBB*1.05))
         end
         redo_thing()
     end
-end
+# end
 
-# SOMETIMES THIS WHOLE THING DOESN'T WORK BECAUSE SHAPE_INFERENCE IS NOT DETERMINISTIC :'(
-# NOW IT WORKS BECAUSE WE RESHAPE THE CONSTANTS
+# SOMETIMES THIS WHOLE THING DOESN'T WORK BBBECAUSE SHAPE_INFERENCE IS NOT DETERMINISTIC :'(
+# NOW IT WORKS BBBECAUSE WE RESHAPE THE CONSTANTS
 
 # options:
 

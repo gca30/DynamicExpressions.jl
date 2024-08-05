@@ -627,7 +627,7 @@ end
 _overload_common_operators()
 
 using ..ShapeInferenceModule: push_constraints_broadcast
-using ..FlattenedTensorListModule: copy_ti!, map2_ti!, mapnb_ti!
+using ..FlattenedTensorListModule: copy_ti!, map2_ti!, mapnb_ti!, mapk_ti!
 
 # TODO: get gradient from somewhere else
 gradient(::typeof(+), l) = 1
@@ -642,23 +642,25 @@ gradientr(::typeof(*), l, r) = l
 # now the operators accept TensorIndex, with the last dimension being the batch size
 broadcast_unaop(op::Fnum; op_complexity=1, symbol::Union{Symbol, Nothing}=nothing) where {Fnum} = TensorOperator(;
     symbol_name = symbol === nothing ? Symbol(op) : symbol,
-    op! = (l, res) -> copy_ti!(op, res, l),
+    op! = (res, l) -> mapk_ti!((rest, lt) -> op(lt), res, l),
     # (l, res) -> (@. res = op(l)),
-    gradient! = (res, ∂res, l, ∂l) -> map2_ti!((l, r) -> gradient(op, l)*r, ∂l, l, ∂res),
+    gradient! = (res, ∂res, l, ∂l) -> mapk_ti!((dlt, lt, rest) -> gradient(op, lt)*rest, ∂l, l, ∂res),
     push_constraints! = push_constraints_broadcast,
     complexity = sl -> length(sl) * op_complexity
 )
 
 broadcast_binop(op::Fnum ; op_complexity=1, symbol::Union{Symbol, Nothing}=nothing) where {Fnum} = TensorOperator(
     symbol_name = symbol === nothing ? Symbol(op) : symbol,
-    op! = (l, r, res) -> map2_ti!(op, res, l, r),
+    op! = (res, l, r) -> mapk_ti!((rest, lt, rt) -> op(lt, rt), res, l, r),
     # (l, r, res) -> (@. res = op(l, r)),
     gradient! = function(res, ∂res, l, ∂l, r, ∂r, ::Val{comp}) where {comp}
         if comp & 0b10 == 0b10
-            mapnb_ti!((a, b, c) -> gradientl(op, b, c)*a, ∂l, ∂res, l, r)
+            mapk_ti!(Returns(0), ∂l)
+            mapk_ti!((dlt, lt, rt, drest) -> gradientl(op, lt, rt)*drest, ∂l, l, r, ∂res)
         end
         if comp & 0b01 == 0b01
-            mapnb_ti!((a, b, c) -> gradientr(op, b, c)*a, ∂r, ∂res, l, r)
+            mapk_ti!(Returns(0), ∂r)
+            mapk_ti!((drt, lt, rt, drest) -> gradientr(op, lt, rt)*drest, ∂r, l, r, ∂res)
         end
     end,
     push_constraints! = push_constraints_broadcast,
