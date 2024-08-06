@@ -18,7 +18,7 @@ import ..FlattenedTensorListModule:
     permute_features!,
     treat_as_flattened,
     feature_flat,
-    copy_ti!,
+    copyto_ti!,
     mapk_ti!,
     selectdim_ti
 using ..NodeUtilsModule:

@@ -4,7 +4,8 @@ module ShapeInferenceModule
 using ...NodeModule: TensorNode
 using ..OperatorEnumModule: TensorOperatorEnum
 using ..FlattenedTensorListModule: FlattenedTensorList
-using ...TensorNodeUtilsModule: recalculate_node_indices!, number_of_indices
+using ..TensorExpressionModule: AbstractTensorExpression, get_tree, get_operators, get_constants, set_constants
+using ...TensorNodeUtilsModule: recalculate_node_indices!, number_of_indices, recalculate_node_values!, reshape_constants
 # using ..TensorExpressionModule: AbstractTensorExpression, get_tree, get_operators
 
 # ----------------------
@@ -552,7 +553,7 @@ function shape_inference_iteration(cs::Vector{Constraint}, cb::CombinedConstrain
                 # println(cs[ci])
                 code, ax = outsubst(cs[ci], cb)
                 if code != 0
-                    error("Error code $(code), conflicting a-variable $(ax)")
+                    return code, ax
                 end
                 cs[ci] = zero(Constraint)
                 # println(cb)
@@ -568,11 +569,11 @@ function shape_inference_iteration(cs::Vector{Constraint}, cb::CombinedConstrain
                 things_did += 1
                 code, ax = innersubst(cs[ci], cb)
                 if code != 0
-                    error("Error code $(code), conflicting a-variable $(ax)")
+                    return code, ax
                 end
                 code, ax = split_and_simplify(cs, ci)
                 if code != 0
-                    error("Error code $(code), conflicting a-variable $(ax)")
+                    return code, ax
                 end
                 # println(cb)
                 # println(cs)
@@ -585,6 +586,8 @@ function shape_inference_iteration(cs::Vector{Constraint}, cb::CombinedConstrain
 
     end
     renormalize_mvars!(cb)
+
+    return 0, 0
 
 end
 
@@ -750,7 +753,7 @@ macro make_constraint(tuple, sets...)
         @view(finalsets[sx, ax, :]) .= lc_eval(sx, sets[sx].args[ax])
     end
     return quote
-        $(esc(:Constraint))(
+        Constraint(
             $(esc(Expr(:ref, :(Int32), tuple.args...))),
             $finalsets
         )
@@ -792,7 +795,8 @@ function shape_inference(
     operators::TensorOperatorEnum,
     cX::Union{FlattenedTensorList{T,N}, AbstractVector{NTuple{N, <:Integer}}};
     indeterminancy_resolve::F1 = default_constraint_indeterminancy_resolve,
-) where {N,T,F1}
+    throw_errors::Val{_throw_errors} = Val(false)
+) where {N,T,F1,_throw_errors}
 
     # now we have indices
     recalculate_node_indices!(tree)
@@ -873,7 +877,13 @@ function shape_inference(
     # println(cs)
 
     while true
-        shape_inference_iteration(cs, cb)
+        code, ax = shape_inference_iteration(cs, cb)
+        if code != 0
+            if _throw_errors
+                error("Error code $(code), conflicting a-variable $(ax)")
+            end
+            return false
+        end
         # println("------- PARTIALLY FINAL SITUATION ------------")
         # println(cb)
         # println(cs)
@@ -911,9 +921,19 @@ function shape_inference(
     end
     final_traverse(tree)
 
+    return true
+
 end
 
-# @inline shape_inference(te::AbstractTensorExpression, args...; kwargs) = shape_inference(get_tree(te), get_operators(te), args...; kwargs...)
+@inline shape_inference(te::AbstractTensorExpression, args...; kwargs...) = shape_inference(get_tree(te), get_operators(te), args...; kwargs...)
 
+function reshape_inference(te::AbstractTensorExpression, args...; kwargs...)
+    r = shape_inference(get_tree(te), get_operators(te), args...; kwargs...)
+    if r == false
+        return false
+    end
+    recalculate_node_values!(get_tree(te), get_constants(te))
+    set_constants(te, reshape_constants(get_tree(te), get_constants(te)))
+end
 
 end

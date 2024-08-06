@@ -3,23 +3,13 @@ using DynamicExpressions.NodeModule: TensorNode
 using DynamicExpressions.TensorNodeUtilsModule: recalculate_node_values!, reshape_constants
 using DynamicExpressions.OperatorEnumModule
 using DynamicExpressions.OperatorEnumModule: TensorOperator, TensorOperatorEnum
-using DynamicExpressions.FlattenedTensorListModule: 
-    FlattenedTensorList, treat_as_flattened, flatten,
-    map2_ti!,
-    mapreduce2nb_ti!,
-    copy_ti!,
-    mapnb_ti!, map2_ti!,
-    mapk_ti!,
-    mapself_ti!,
-    TensorIndex,
-    selectdim_ti,
-    materialize_ti
-using DynamicExpressions.OperatorEnumConstructionModule
-using DynamicExpressions.OperatorEnumConstructionModule: broadcast_binop, broadcast_unaop, @extend_operators
-using DynamicExpressions.ShapeInferenceModule
-using DynamicExpressions.ShapeInferenceModule: @make_constraint, CombinedConstraints, Constraint, shape_inference
+using DynamicExpressions.FlattenedTensorListModule: FlattenedTensorList, treat_as_flattened, flatten
+using DynamicExpressions.OperatorEnumConstructionModule: @extend_operators
+using DynamicExpressions.TensorOperatorsModule: broadcast_binop, broadcast_unaop, op_mm, op_conv, op_mse_loss, op_T
+using DynamicExpressions.ShapeInferenceModule: reshape_inference
 using DynamicExpressions.EvaluateTensorsModule: eval_diff_tree_array_cpu, eval_tree_array_cpu
 using DynamicExpressions.StringsModule: string_debug_tree
+using DynamicExpressions.TensorExpressionModule: make_tensor_expression, set_constants
 
 c1 = TensorNode{Float32, 3}(; feature=1, constant=true)
 c2 = TensorNode{Float32, 3}(; feature=2, constant=true)
@@ -34,118 +24,8 @@ x4 = TensorNode{Float32, 3}(; feature=3, constant=false)
 loss(x, y) = (x-y)^2
 woaw(x) = x^2-5*x+9
 
-op_loss = TensorOperator(;
-    symbol_name = :loss,
-    op! = function(res::TensorIndex{IXT,NP1,T}, l, r) where {IXT,NP1,T}
-        #for bx in 1:res.shape[NP1]
-        #r2 = selectdim_ti(res, NP1, bx)
-        mapk_ti!(Returns(zero(IXT)), res)
-        mapk_ti!((rest, lt, rt) -> rest+(lt-rt)^2, res, l, r)
-        #end
-    end,
-    gradient! = function(res, l, dl, r)
-        mapk_ti!((dlt, lt, rt) -> 2*(lt-rt), dl, l, r)
-    end,
-    push_constraints! = function(cs, (resoff, loff, roff), ::Val{N}) where {N}
-        for nx in 1:N
-            push!(cs, @make_constraint((resoff+nx, loff+nx, roff+nx), (1, n, n)))
-        end
-    end,
-    complexity = (sl, sr) -> prod(sl)
-)
-
-@inline seldims(x, i, j) = selectdim_ti(selectdim_ti(x, 1, i), 2, j) #x[i, j, ntuple(Returns(:), Val(N-2))...]
-
-op_mm = TensorOperator(;
-    symbol_name = :mm,
-    op! = function(res::TensorIndex{IXT,NP1,T}, l, r) where {IXT,NP1,T}
-        # @show size(res)
-        # @show size(l)
-        # @show size(r)
-        mapk_ti!(Returns(zero(T)), res)
-        for i in axes(l, 1), j in axes(r, 2)
-            #@show i, j
-            for k in axes(l, 2)
-             #   @show i, j, k
-                # @show selectdim(selectdim(res, 1, i), 1, j)
-                # @show selectdim(selectdim(l, 1, i), 1, k)
-                # @show selectdim(selectdim(r, 1, k), 1, j)
-                # @show seldims(res, i, j).shape
-                # @show seldims(l, i, k).shape
-                # @show seldims(r, k, j)
-                #@show "before", materialize_ti(selectdim_ti(res, NP1, 1:10))
-                mapk_ti!((d, l, r) -> d+l*r, seldims(res, i, j), seldims(l, i, k), seldims(r, k, j))
-                #@show "after", materialize_ti(selectdim_ti(res, NP1, 1:10))
-            end
-        end
-        #@show materialize_ti(selectdim_ti(res, NP1, 1:100))
-    end,
-    gradient! = function(res::TensorIndex{IXT,N,T}, dres, l, dl, r, dr, ::Val{comp}) where {comp,IXT,N,T}
-        if comp & 0b01 != 0 # right
-            # DR = L^T DRES
-            mapk_ti!(Returns(zero(T)), dr)
-            for i in axes(dr, 1), j in axes(dr, 2)
-                for k in axes(dres, 1)
-                    mapk_ti!((d, l, r) -> d+l*r, seldims(dr, i, j), seldims(l, k, i), seldims(dres, k, j))
-                end
-            end
-        end
-        if comp & 0b10 != 0 # left
-            # DL = DRES R^T
-            mapk_ti!(Returns(zero(T)), dl)
-            for i in axes(dl, 1), j in axes(dl, 2)
-                for k in axes(dres, 2)
-                    mapk_ti!((d, l, r) -> d+l*r, seldims(dl, i, j), seldims(dres, i, k), seldims(r, j, k))
-                end
-            end
-        end
-    end,
-    push_constraints! = function(cs, (resoff, loff, roff), ::Val{N}) where {N}
-        push!(cs, @make_constraint((resoff+1, resoff+2, loff+1, loff+2, roff+1, roff+2), (n, p, n, m, m, p)))
-        for nx in 3:N
-            push!(cs, @make_constraint((resoff+nx, loff+nx, roff+nx), (n, n, n)))
-        end
-    end,
-    complexity = (sl, sr) -> prod(sl[3:end]) * sl[1] * sr[2]
-)
-
-op_conv = TensorOperator(;
-    symbol_name = :conv,
-    op! = function(res, l, r)
-        # res .= rand(size(res)...)
-    end,
-    gradient! = function(res, dres, l, dl, r, dr, ::Val{comp}) where {comp}
-        # TODO: implement this and op!
-    end,
-    push_constraints! = function(cs, (resoff, loff, roff), ::Val{N}) where {N}
-        for nx in 1:N
-            # for a given n or m, only one of these cases will be correct
-            push!(cs, @make_constraint((resoff+nx, loff+nx, roff+nx), (n+1-m, n, m), (m+1-n, n, m)))
-        end
-    end,
-    complexity = (sl, sr) -> prod(abs.(sl.-sr).+1) * prod(min.(sl, sr))
-)
-
-op_T = TensorOperator(;
-    symbol_name = :T,
-    op! = function(res, l)
-        #permutedims!(res, l, ntuple(i -> i<3 ? 3-i : i, Val(N)))
-        # TODO: implement this
-    end,
-    gradient! = function(res, dres, l, dl)
-        #permutedims!(dl, dres, ntuple(i -> i<3 ? 3-i : i, Val(N)))
-    end,
-    push_constraints! = function(cs, (resoff, loff), ::Val{N}) where {N}
-        push!(cs, @make_constraint((resoff+1, resoff+2, loff+1, loff+2), (n, m, m, n)))
-        for nx in 3:N
-            push!(cs, @make_constraint((resoff+nx, loff+nx), (n, n)))
-        end
-    end,
-    complexity = (sl) -> prod(sl)
-)
-
 operators = TensorOperatorEnum(;
-    binary_operators=[broadcast_binop(+), broadcast_binop(*), broadcast_binop(-), op_mm, op_conv, op_loss], 
+    binary_operators=[broadcast_binop(+), broadcast_binop(*), broadcast_binop(-), op_mm, op_conv], 
     unary_operators=[broadcast_unaop(-), broadcast_unaop(woaw), op_T]
 )
 @extend_operators operators
@@ -159,67 +39,6 @@ trees = [
 ]
 
 # for tree in trees println(tree) end
-
-
-# ----------------------
-# SHAPE INFERENCE EXAMPLE
-# ----------------------
-
-cb = CombinedConstraints(44, 5)
-cs = Constraint[]
-# a1 = a2 is equivalent to:
-push!(cs, Constraint(
-    Int32[1, 2],
-    begin
-        out = Array{Int32, 3}(undef, 1, 2, 2)
-        out[1, 1, :] .= (0, 1)
-        out[1, 2, :] .= (0, 1)
-        out
-    end
-))
-# a3 = 5 is equivalent to:
-push!(cs, Constraint(
-    Int32[3],
-    Int32[5;;;]
-))
-# (a4,a5,a6) = {(n,1,n)} u {(n,n,n)} u {(n,n,1)} is:
-push!(cs, Constraint(
-    Int32[4, 5, 6],
-    begin
-        out = Array{Int32, 3}(undef, 3, 3, 2)
-        out[1, 1, :] .= (0, 1)
-        out[1, 2, :] .= (1, 0)
-        out[1, 3, :] .= (0, 1)
-        out[2, 1, :] .= (0, 1)
-        out[2, 2, :] .= (0, 1)
-        out[2, 3, :] .= (0, 1)
-        out[3, 1, :] .= (0, 1)
-        out[3, 2, :] .= (0, 1)
-        out[3, 3, :] .= (1, 0)
-        out
-    end
-))
-# a9 = a7+a8 is:
-push!(cs, Constraint(
-    Int32[7, 8, 9],
-    begin
-        out = Array{Int32, 3}(undef, 1, 3, 3)
-        out[1, 1, :] .= (0, 1, 0)
-        out[1, 2, :] .= (0, 0, 1)
-        out[1, 3, :] .= (0, 1, 1)
-        out
-    end
-))
-
-cb.values[3, 3] = 3
-cb.values[4, 5] = 6
-cb.values[3, 5] = 3
-cb.values[1, 5] = 2
-cb.values[1, 1] = 9
-cb.values[1, 2] = 9
-cb.values[1, 3] = 1
-# print(cb)
-# print(cs)
 # cX = treat_as_flattened(buffer, [(3, 3, 1), (1, 3, 1), (3, 1, 1), (1, 1, 1)], 2)
 # for i in 1:4
 #     println("DOING TREE ", i)
@@ -247,30 +66,17 @@ BBB = 3_000
 println("Making cX")
 cX = flatten(Vector{Float32}, [rand(Float32, BBB, 4, 1, 1), rand(Float32, BBB, 4, 1, 1), rand(Float32, BBB, 4, 1, 1), rand(Float32, BBB, 4, 1, 1)])
 
-# the result of the operation will be computed here (if you don't compute the derivative)
-println("Making results ftl")
-results = flatten(Vector{Float32}, [rand(Float32, BBB, 4, 1, 1)])
-
-# the constants that are used in the expression
-# the first is the sample is the actual value and the second is the to-be-computed derivative
-
-# infers the shapes and puts them into the tree
-# later this will have a specific shape generator
-println("Making results constants ftl")
 constants = flatten(Vector{Float32}, [rand(Float32, 2, 4, 1, 1), rand(Float32, 2, 4, 1, 1)])
-println("Running shape inference")
-shape_inference(trees[5], operators, cX)
-println("Recalculating node values")
-recalculate_node_values!(trees[5], constants)
-println("Reshaping node constants to desired value")
-constants = reshape_constants(trees[5], constants)
-println("The tree is:\n", string_debug_tree(trees[5]))
+te = make_tensor_expression(trees[5], constants, operators)
+reshape_inference(te, cX)
 
-reducer_op = op_loss
+
+reducer_op = op_mse_loss
 
 eval_diff_tree_array_cpu(trees[5], constants, operators,  cX, reducer_op,       buffer)
 
 BBB = 11
+
 
 function redo_thing()
     # global BBB
@@ -292,9 +98,8 @@ function redo_thing()
     # infers the shapes and puts them into the tree
     # later this will have a specific shape generator
     constants = flatten(Vector{Float32}, [rand(Float32, 2, 4, 1, 1), rand(Float32, 2, 4, 1, 1)])
-    shape_inference(trees[5], operators, cX)
-    recalculate_node_values!(trees[5], constants)
-    constants = reshape_constants(trees[5], constants)
+    set_constants(te, constants)
+    reshape_inference(te, cX)
 
     #println("OK, now we run")
     print(BBB, " ")

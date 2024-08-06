@@ -5,12 +5,12 @@ using ..FlattenedTensorListModule:
     FlattenedTensorList,
     treat_as_flattened,
     sample_flat,
-    mapself_ti!,
     feature,
     feature_flat,
     value,
-    map2_ti!,
     mapk_ti!,
+    zero_ti!,
+    addto_ti!,
     materialize_ti
 using ..NodeModule:
     AbstractNode,
@@ -253,7 +253,7 @@ function _backward_eval_diff_tree_array_cpu(
             f1 = feature(constants, node.feature, 2)
             for i in 1:batch_len
                 r = feature(temp, node.grad_ix, i)
-                map2_ti!(+, f1, f1, r)
+                addto_ti!(f1, r)
             end
         end
     elseif node.degree == 1
@@ -331,7 +331,7 @@ function eval_diff_tree_array_cpu(
     # display(output)
     # println()
 
-    mapself_ti!(Returns(zero(IXT)), sample_flat(constants, 2))
+    zero_ti!(sample_flat(constants, 2))
 
     result = zero(T)
     for i in 1:div(cX.B + output.B-1, output.B)
@@ -380,7 +380,7 @@ function _eval_tree_array_cpu(
 
     _forward_eval_diff_tree_array_cpu(tree, constants, operators, cX, temp, batch_offset, batch_len)
     
-    mapk_ti!((_, b) -> b, feature(out_results, 1, (batch_offset+1):(batch_offset+batch_len)), @valsrc(tree))
+    copyto_ti!(feature(out_results, 1, (batch_offset+1):(batch_offset+batch_len)), @valsrc(tree))
 
 end
 

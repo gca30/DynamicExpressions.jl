@@ -1,10 +1,14 @@
 
 module TensorExpressionModule
 
+using ..FlattenedTensorListModule: FlattenedTensorList
+using ..NodeModule: AbstractTensorExprNode
+using ..OperatorEnumModule: TensorOperatorEnum
+
 # Many functions don't work on the AbstractExpression
 abstract type AbstractTensorExpression{T,N} end
 
-struct TensorExpression{T,N,FTL<:FlattenedTensorList{T,N},NodeT<:AbstractTensorExprNode{T,N},TOET<:TensorOperatorEnum,MetadataT<:NamedTuple} <: AbstractTensorExpression{T,N}
+mutable struct TensorExpression{T,N,FTL<:FlattenedTensorList{T,N},NodeT<:AbstractTensorExprNode{T,N},TOET<:TensorOperatorEnum,MetadataT<:NamedTuple} <: AbstractTensorExpression{T,N}
     tree::NodeT
     constants::FTL
     operators::TOET
@@ -13,10 +17,11 @@ end
 
 get_tree(te::TensorExpression) = te.tree
 get_constants(te::TensorExpression) = te.constants
+set_constants(te::TensorExpression, constants::FlattenedTensorList) = te.constants = constants
 get_operators(te::TensorExpression) = te.operators
 get_metadata(te::TensorExpression) = te.metadata
 
-function make_tensor_expression(tree::AbstractTensorExprNode{T,N}, constants::FlattenedTensorList{T,N}, operators::TensorOperatorEnum)
+function make_tensor_expression(tree::AbstractTensorExprNode{T,N}, constants::FlattenedTensorList{T,N}, operators::TensorOperatorEnum) where {T,N}
     return TensorExpression(tree, constants, operators, (;))
 end
 

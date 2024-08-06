@@ -148,6 +148,7 @@ end
 
 using StaticArrays
 
+
 function _map1_ti!(op::F, dest::TensorIndex{IXT,N}) where{F,IXT,N}
     ii = MVector{N,IXT}(ntuple(Returns(1), Val(N)))
     iterlen = length(dest)
@@ -189,6 +190,7 @@ function _map1v_ti!(op::F, dest::TensorIndex{IXT,N}, ::Val{V}) where{F,IXT,N,V}
     for i in 1:V
         viewlen *= dest.shape[i]
     end
+    viewlen-=1
     for i in (V+1):N
         iterlen *= dest.shape[i]
     end
@@ -204,8 +206,8 @@ function _map1v_ti!(op::F, dest::TensorIndex{IXT,N}, ::Val{V}) where{F,IXT,N,V}
     while true
         i += 1
 
-        for k in 0:(viewlen-1)
-            @inbounds dest.ar[dinar+k] = op((@inbounds dest.ar[dinar+k]))
+        for j in 0:viewlen
+            @inbounds dest.ar[dinar+j] = op((@inbounds dest.ar[dinar+j]))
         end
 
         if i >= iterlen
@@ -243,7 +245,8 @@ function _mapkv_ti!(op::F, dest::TensorIndex{IXT,N}, ::Val{V}, sources::Vararg{T
     for i in 1:V
         viewlen *= dest.shape[i]
     end
-    
+    viewlen -= 1
+
     iterlen = prod(itershape)
     ii = MVector{N-V,IXT}(ntuple(Returns(1), Val(N-V)))
     # why can't julia have static mutable arrays on the stack??
@@ -276,10 +279,10 @@ function _mapkv_ti!(op::F, dest::TensorIndex{IXT,N}, ::Val{V}, sources::Vararg{T
     while true
         i += 1
         #@show dinar, sinar, ii
-        for j in 0:(viewlen-1)
+        for j in 0:viewlen
             @inbounds dest.ar[dinar+j] = op(
                 (@inbounds dest.ar[dinar+j]),
-                ntuple(kx -> (@inbounds sources[kx].ar[sinar[kx]]), Val(K))...
+                ntuple(kx -> (@inbounds sources[kx].ar[sinar[kx]+j]), Val(K))...
             )
         end
 
@@ -354,8 +357,8 @@ function _mapk_ti!(op::F, dest::TensorIndex{IXT,N}, sources::Vararg{TensorIndex{
         #@show dinar, sinar, ii
 
         @inbounds dest.ar[dinar] = op(
-            (@inbounds dest.ar[dinar]),
-            ntuple(kx -> (@inbounds sources[kx].ar[sinar[kx]]), Val(K))...
+            @inbounds(dest.ar[dinar]),
+            ntuple(kx -> @inbounds(sources[kx].ar[sinar[kx]]), Val(K))...
         )
 
         if i >= iterlen
@@ -365,16 +368,16 @@ function _mapk_ti!(op::F, dest::TensorIndex{IXT,N}, sources::Vararg{TensorIndex{
         ii[1] += 1
         dinar += djumps[1]
         for kx in 1:K
-            sinar[kx] += @inbounds sjumps[kx,1]
+            sinar[kx] += @inbounds(sjumps[kx,1])
         end
 
         nx = 1
-        while (@inbounds ii[nx]) > (@inbounds itershape[nx])
+        while @inbounds(ii[nx]) > @inbounds(itershape[nx])
             @inbounds ii[nx+1] += 1
             @inbounds ii[nx] = 1
-            dinar += @inbounds djumps[nx+1]
+            dinar += @inbounds(djumps[nx+1])
             for kx in 1:K
-                @inbounds sinar[kx] += @inbounds sjumps[kx,nx+1]
+                @inbounds sinar[kx] += @inbounds(sjumps[kx,nx+1])
             end
             nx+=1
         end
@@ -393,136 +396,73 @@ end
 
 @inline function _mapk_full_ti!(op::F, dest::TensorIndex{IXT,N}, sources::Vararg{TensorIndex{IXT,N},K}) where {F,IXT,N,K}
     for j in 1:length(dest)
-        @inbounds dest.ar[dest.offset+j] = op(@inbounds dest.ar[dest.offset+j], ntuple(kx -> (@inbounds sources[kx].ar[sources[kx].offset+j]), Val(K))...)
+        @inbounds dest.ar[dest.offset+j] = op(@inbounds(dest.ar[dest.offset+j]), ntuple(kx -> (@inbounds sources[kx].ar[sources[kx].offset+j]), Val(K))...)
     end
+    return nothing
 end
 
 @generated function mapk_ti!(op::F, dest::TensorIndex{IXT,N}, sources::Vararg{TensorIndex{IXT,N},K}) where {F,IXT,N,K}
     #_mapk_ti!(op, dest, sources...)
-    return quote if K == 0
+    return if K == 0 quote 
         cd = continuous_dims(dest)
         if cd == 0
-            return _map1_ti!(op, dest)
+            # println("_map1_ti!")
+            _map1_ti!(op, dest)
         elseif cd == N
+            # println("_map1_full_ti!")
             for k in 1:length(dest)
                 @inbounds dest.ar[dest.offset+k] = op(@inbounds dest.ar[dest.offset+k])
             end
-            return nothing
         else
+            # println("_map1v_ti!")
             Base.@nif($N, i -> cd == i, i -> _map1v_ti!(op, dest, Val(i)))
-            return nothing
         end
-    else
+        return nothing
+    end else quote
         cd = continuous_dims(dest, sources...)
         if cd == 0
-            return _mapk_ti!(op, dest, sources...)
+            # println("_mapk_ti!")
+            _mapk_ti!(op, dest, sources...)
         elseif cd == N
-            return _mapk_full_ti!(op, dest, sources...)
+            # println("_mapk_full_ti!")
+            _mapk_full_ti!(op, dest, sources...)
         else
+            # println("_mapkv_ti!")
             Base.@nif($N, i -> cd == i, i -> _mapkv_ti!(op, dest, Val(i), sources...))
-            return nothing
         end
+        return nothing
     end end
 end
 
-function _copy_ti_simple!(op::F, dest::TensorIndex{IXT,N}, source::TensorIndex{IXT,N}) where {IXT,N,F}
-    l = length(dest)
-    di = MVector{N,IXT}(ntuple(Returns(1), Val(N))...)
-    doffjump = ntuple(nx -> dest.strides[nx+1] - dest.shape[nx]*dest.strides[nx], Val(N-1))
-    soffjump = ntuple(nx -> source.strides[nx+1] - source.shape[nx]*source.strides[nx], Val(N-1))
-    di[1] = 0
-    dinar = dest.offset
-    sinar = source.offset
-    i = 0
-    while i < l
-        i += 1
-        dinar += dest.strides[1]
-        sinar += source.strides[1]
-        di[1] += 1
-        nx = 1
-        while di[nx] > dest.shape[nx]
-            di[nx+1] += 1
-            di[nx] = 1
-            dinar +=  doffjump[nx]
-            sinar +=  soffjump[nx]
-            nx += 1
-        end
-         dest.ar[dinar] = op( source.ar[sinar])
-    end
-    return nothing
+@inline function zero_ti!(dest::TensorIndex{IXT,N}) where{IXT,N}
+    mapk_ti!(Returns(zero(IXT)), dest)
 end
 
-function _copy_ti_views(op::F, dest::TensorIndex{IXT,N}, source::TensorIndex{IXT,N}, viewdims::Integer) where {IXT,N,F}
-    iterlen = 1
-    viewlen = 1
-    for nx in 1:viewdims
-        viewlen *= dest.shape[nx]
-    end
-    viewdims+=1
-    for nx in viewdims:N
-        iterlen *= dest.shape[nx]
-    end
-    
-    di = MVector{N,IXT}(ntuple(Returns(1), Val(N))...)
-    doffjump = ntuple(nx -> dest.strides[nx+1] - dest.shape[nx]*dest.strides[nx], Val(N-1))
-    soffjump = ntuple(nx -> source.strides[nx+1] - source.shape[nx]*source.strides[nx], Val(N-1))
-    di[viewdims] = 0
-    dinar = dest.offset
-    sinar = source.offset
-    i = 0
-    while i < iterlen
-        i += 1
-        for j in 1:viewlen
-             dest.ar[dinar+j] = op( source.ar[sinar+j])
-        end
-        
-        dinar += dest.strides[viewdims]
-        sinar += source.strides[viewdims]
-        di[viewdims] += 1
-        nx = viewdims
-        while di[nx] > dest.shape[nx]
-            di[nx+1] += 1
-            di[nx] = 1
-            dinar +=  doffjump[nx]
-            sinar +=  soffjump[nx]
-            nx += 1
-        end
-    end
-    return nothing
+@inline function copyto_ti!(dest::TensorIndex{IXT,N}, src::TensorIndex{IXT,N}) where{IXT,N}
+    mapk_ti!((_,s) -> s, dest, src)
 end
+
+@inline function addto_ti!(op::F, dest::TensorIndex{IXT,N}, sources::Vararg{TensorIndex{IXT,N},K}) where{F,IXT,N,K}
+    mapk_ti!((dt,sts...) -> dt+op(sts...), dest, sources...)
+end
+
+@inline function addto_ti!(dest::TensorIndex{IXT,N}, source::TensorIndex{IXT,N}) where{IXT,N}
+    mapk_ti!((dt,st) -> dt+st, dest, source)
+end
+
 
 # using a 100_000x5x5x5 array: 
-#                without op  with op
+#                without op  with op 
 # new copy        ~14.5 ms    ~16.0ms    copy_ti!(feature(ftl, 1), feature(ftl, 2))
 # new copy flat   ~14.4 ms    ~14.6ms    copy_ti!(feature_flat(ftl, 1), feature_flat(ftl, 2))
-# new copy simple ~14ms      ~14ms       copy_ti_simple!(op, feature_flat(ftl, 1), feature_flat(ftl, 2))
+# new copy simple ~14ms       ~14ms      copy_ti_simple!(op, feature_flat(ftl, 1), feature_flat(ftl, 2))
 # raw vectors     ~5.8 ms     ~9.6ms     x1 .= x2
 # 1-dim views     ~9.4 ms     ~9.4ms     @view(x1[:]) .= @view(x1[:]
 # N-dim views     ~14.5 ms    ~7.8ms     @view(x1[1:B,:,:,:]) .= @view(x1[1:B,:,:,:]
 # before          ~1.7s       ~660ms     ftl[1] .= ftl[2] (due to copying somewhere)
-function copy_ti!(op::F, dest::TensorIndex{IXT,N}, source::TensorIndex{IXT,N}) where {IXT, N, F}
-    cd = min(continuous_dims(dest), continuous_dims(source))
-    if cd == 0
-        _copy_ti_simple!(op, dest, source)
-    elseif cd == N
-         @view(dest.ar[dest.offset:(dest.offset+length(dest))]) .= op.( @view(source.ar[source.offset:(source.offset+length(dest))]))
-    else
-        _copy_ti_views(op, dest, source, cd)
-    end
-    return nothing
-end
-
-function copy_ti!(dest::TensorIndex{IXT,N}, source::TensorIndex{IXT,N}) where {IXT,N}
-    cd = min(continuous_dims(dest), continuous_dims(source))
-    if cd == 0
-        _copy_ti_simple!(identity, dest, source)
-    elseif cd == N
-         @view(dest.ar[dest.offset:(dest.offset+l)]) .=  @view(source.ar[source.offset:(source.offset+l)])
-    else
-        _copy_ti_views(identity, dest, source, cd)
-    end
-    return nothing
-end
+# mapk_ti!        ~23.2ms or ~15ms (they sometimes give diffrent reuslts even using @benchmark)
+# mapk_ti! flat   ~15.3ms or ~22ms (they sometimes give diffrent reuslts even using @benchmark)
+#function copy_ti!(op::F, dest::TensorIndex{IXT,N}, source::TensorIndex{IXT,N}) where {IXT, N, F}
 
 # Benchmarks for 100_000:
 # first version: 15.8ms
@@ -531,280 +471,19 @@ end
 # views:      2.5ms
 # before:     220ms
 # still a 15x improvement, but not compared to the 80x improvement for raw arrays
-function _map2b_ti!(op::F, dest::TensorIndex{IXT,N}, lterm::TensorIndex{IXT,N}, rterm::TensorIndex{IXT,N}) where {IXT,N,F}
-
-    itershape = ntuple(nx -> max(dest.shape[nx], lterm.shape[nx], rterm.shape[nx]), Val(N))
-    len = prod(itershape)
-
-    ii = MVector{N,IXT}(ntuple(Returns(1), Val(N))...)
-    doffjump = ntuple(nx -> if nx == 1
-        itershape[1] == dest.shape[1] ? dest.strides[1] : 0 # iteration stride
-    elseif itershape[nx-1] != dest.shape[nx-1]
-        dest.strides[nx-1] # if the previous overflown axis was broadcasted, you need to advance to the next element
-    elseif itershape[nx] == dest.shape[nx]
-        dest.strides[nx] - dest.shape[nx-1]*dest.strides[nx-1] # from the overflown last element to the next first element
-    else
-        -dest.shape[nx-1]*dest.strides[nx-1] # if you overflow into a broadcasted axis, go back to 1
-    end, Val(N))
-    loffjump = ntuple(nx -> if nx == 1
-        itershape[1] == lterm.shape[1] ? lterm.strides[1] : 0 # iteration stride
-    elseif itershape[nx-1] != lterm.shape[nx-1]
-        lterm.strides[nx-1] # if the previous overflown axis was broadcasted, you need to advance to the next element
-    elseif itershape[nx] == lterm.shape[nx]
-        lterm.strides[nx] - lterm.shape[nx-1]*lterm.strides[nx-1] # from the overflown last element to the next first element
-    else
-        -lterm.shape[nx-1]*lterm.strides[nx-1] # if you overflow into a broadcasted axis, go back to 1
-    end, Val(N))
-
-    roffjump = ntuple(nx -> if nx == 1
-        itershape[1] == rterm.shape[1] ? rterm.strides[1] : 0
-    elseif itershape[nx-1] != rterm.shape[nx-1]
-        rterm.strides[nx-1]
-    elseif itershape[nx] == rterm.shape[nx]
-        rterm.strides[nx] - rterm.shape[nx-1]*rterm.strides[nx-1]
-    else
-        -rterm.shape[nx-1]*rterm.strides[nx-1]
-    end, Val(N))
-    
-    dinar = dest.offset+1
-    rinar = rterm.offset+1
-    linar = lterm.offset+1
- 
-    i = 0
-    while i < len
-        i += 1
-
-        nx = 1
-        while ii[nx] > itershape[nx]
-            ii[nx+1] += 1
-            ii[nx] = 1
-            dinar += doffjump[nx+1]
-            rinar += roffjump[nx+1]
-            linar += loffjump[nx+1]
-            nx += 1
-        end
-        
-         dest.ar[dinar] = op(( dest.ar[dinar]), ( lterm.ar[linar]), ( rterm.ar[rinar]))
-
-        ii[1] += 1
-        dinar += doffjump[1]
-        linar += loffjump[1]
-        rinar += roffjump[1]
-        
-    end
-    return nothing
-end
+#function _map2b_ti!(op::F, dest::TensorIndex{IXT,N}, lterm::TensorIndex{IXT,N}, rterm::TensorIndex{IXT,N}) where {IXT,N,F}
 
 # for 100_000x10x10:
 # _map2nbv_ti! 1ms
 # raw arrays   9ms
 # views        10ms
-function _map2nbv_ti!(op::F, dest::TensorIndex{IXT,N}, lterm::TensorIndex{IXT,N}, rterm::TensorIndex{IXT,N}, viewdims::Integer) where {IXT,N,F}
-
-    #cd = min(continuous_dims(dest), continuous_dims(rterm), continuous_dims(lterm))
-    iterlen = 1
-    viewlen = 1
-    for nx in 1:viewdims
-        viewlen *= dest.shape[nx]
-    end
-    viewdims+=1
-    for nx in viewdims:N
-        iterlen *= dest.shape[nx]
-    end
-
-    di = MVector{N,IXT}(ntuple(Returns(1), Val(N))...)
-    doffjump = ntuple(nx -> dest.strides[nx+1] - dest.shape[nx]*dest.strides[nx], Val(N-1))
-    loffjump = ntuple(nx -> lterm.strides[nx+1] - lterm.shape[nx]*lterm.strides[nx], Val(N-1))
-    roffjump = ntuple(nx -> rterm.strides[nx+1] - rterm.shape[nx]*rterm.strides[nx], Val(N-1))
-    dinar = dest.offset
-    linar = lterm.offset
-    rinar = rterm.offset
-    i = 0
-    while i < iterlen
-        i += 1
-        nx = viewdims
-        while di[nx] > dest.shape[nx]
-            di[nx+1] += 1
-            di[nx] = 1
-            dinar +=  doffjump[nx]
-            linar +=  loffjump[nx]
-            rinar +=  roffjump[nx]
-            nx += 1
-        end
-
-        for j in 1:viewlen
-             dest.ar[dinar+j] = op(
-                ( dest.ar[dinar+j]),
-                ( lterm.ar[linar+j]),
-                ( rterm.ar[rinar+j])
-            )
-        end
-        
-        dinar += dest.strides[viewdims]
-        if dinar - dest.offset < 300
-            @show di, dinar, linar, rinar
-        end
-        linar += lterm.strides[viewdims]
-        rinar += rterm.strides[viewdims]
-        di[viewdims] += 1
-        
-    end
-    return nothing
-end
-
-function map2_ti!(op::F, dest::TensorIndex{IXT,N}, lterm::TensorIndex{IXT,N}, rterm::TensorIndex{IXT,N}) where {IXT,N,F}
-    if all(ntuple(nx -> dest.shape[nx] == lterm.shape[nx] && dest.shape[nx] == rterm.shape[nx], Val(N)))
-        cd = min(continuous_dims(dest), continuous_dims(lterm), continuous_dims(rterm))
-        if cd == N
-            A = @view(dest.ar[(dest.offset+1):(dest.offset+length(dest))])
-            B = @view(lterm.ar[(lterm.offset+1):(lterm.offset+length(lterm))])
-            C = @view(rterm.ar[(rterm.offset+1):(rterm.offset+length(rterm))])
-            for i in 1:length(A)
-                A[i] = op(A[i], B[i], C[i])
-            end
-            #@. A = op(B,C)
-        else
-            println("_map2nbv_ti!")
-            _map2nbv_ti!(op, dest, lterm, rterm, cd)
-        end
-    else
-        println("_map2b_ti!")
-        _map2b_ti!(op, dest, lterm, rterm)
-    end
-end
-
-function reducedim_ti!(op::F, reduce_op::Fr, dest::TensorIndex{IXT,N,T}, source::TensorIndex{IXT,N}) where {IXT,N,T,F,Fr}
-    len = length(dest)
-    si = MVector{N,IXT}(ntuple(Returns(1), Val(N))...)
-    doffjump = ntuple(nx -> nx == 1 ? dest.strides[1] : dest.strides[nx] - dest.shape[nx-1]*dest.strides[nx-1], Val(N))
-    soffjump = ntuple(nx -> nx == 1 ? source.strides[1] : source.strides[nx] - source.shape[nx-1]*source.strides[nx-1], Val(N))
-    
-    dinar = dest.offset+1
-    sinar = source.offset+1
- 
-    i = 0
-    while i < len
-        i += 1
-
-        nx = 1
-        while si[nx] > source.shape[nx]
-            si[nx+1] += 1
-            si[nx] = 1
-            sinar += soffjump[nx+1]
-            nx += 1
-        end
-        
-         dest.ar[dinar] = reduce_op(( dest.ar[dinar]), ( source.ar[sinar]))
-
-        si[1] += 1
-        dinar += doffjump[1]
-        linar += loffjump[1]
-        rinar += roffjump[1]
-        
-    end
-end
-
-function mapreduce2nb_ti!(op::F, reduce_op::Fr, startr::T, lterm::TensorIndex{IXT,N,T}, rterm::TensorIndex{IXT,N}) where {IXT,N,T,F,Fr}
-    iterlen = length(lterm)
-
-    di = MVector{N,IXT}(ntuple(Returns(1), Val(N))...)
-    loffjump = ntuple(nx -> lterm.strides[nx+1] - lterm.shape[nx]*lterm.strides[nx], Val(N-1))
-    roffjump = ntuple(nx -> rterm.strides[nx+1] - rterm.shape[nx]*rterm.strides[nx], Val(N-1))
-    linar = lterm.offset+1
-    rinar = rterm.offset+1
-    i = 0
-
-    while true
-        i += 1
-        startr = reduce_op(startr, op(lterm.ar[linar], rterm.ar[rinar]))
-        
-        linar += lterm.strides[1]
-        rinar += rterm.strides[1]
-
-        if i >= iterlen
-            break
-        end
-
-        di[1] += 1
-        nx = 1
-        while di[nx] > lterm.shape[nx]
-            di[nx+1] += 1
-            di[nx] = 1
-            linar +=  loffjump[nx]
-            rinar +=  roffjump[nx]
-            nx += 1
-        end
-    end
-
-    return startr
-end
-
-function mapnb_ti!(op::F, dest::TensorIndex{IXT,N}, terms::Vararg{TensorIndex{IXT,N},M}) where {IXT,N,M,F}
-    iterlen = length(dest)
-
-    di = MVector{N,IXT}(ntuple(Returns(1), Val(N))...)
-    doffjump = NTuple{N-1, IXT}(ntuple(nx -> dest.strides[nx+1] - dest.shape[nx]*dest.strides[nx], Val(N-1)))
-    toffjump = NTuple{M, NTuple{N-1, IXT}}(ntuple(mx -> ntuple(nx -> terms[mx].strides[nx+1] - terms[mx].shape[nx]*terms[mx].strides[nx], Val(N-1)), Val(M)))
-    # @show doffjump
-    # @show dest.strides
-    # @show map(t -> t.strides, terms)
-    # @show toffjump
-    tinar = MVector{M,IXT}(ntuple(mx -> terms[mx].offset+1, Val(M))...)
-    dinar = IXT(dest.offset+1)
-    i = 0
-
-    while true
-        i += 1
-         dest.ar[dinar] = op(( dest.ar[dinar]), ntuple(mx -> ( terms[mx].ar[ tinar[mx]]), Val(M))...)
-        
-        if i >= iterlen
-            break
-        end
-
-        for mx in 1:M
-            tinar[mx] +=  terms[mx].strides[1]
-        end
-        dinar += dest.strides[1]
-        di[1] += 1
-        nx = one(IXT)
-        while  di[nx] > dest.shape[nx]
-             di[nx+1] += 1
-             di[nx] = 1
-            for mx in 1:M
-                tinar[mx] +=  toffjump[mx][nx]
-            end
-            dinar +=  doffjump[nx]
-            nx += 1
-        end
-        # @show di
-
-        @assert dinar == index(dest, di...)
-        for mx in 1:M
-          #  @show mx
-            if tinar[mx] != index(terms[mx], di...)
-                @show tinar[mx]
-                @show di
-                @show dest.shape
-                @show toffjump[mx]
-                @show mx
-                @show terms[mx].shape
-                @show terms[mx].offset
-                @show terms[mx].strides
-                @show index(terms[mx], di...)
-                error("MISMATCH")
-            end
-        end
-    end
-    return nothing
-end
+# function _map2nbv_ti!(op::F, dest::TensorIndex{IXT,N}, lterm::TensorIndex{IXT,N}, rterm::TensorIndex{IXT,N}, viewdims::Integer) where {IXT,N,F}
 
 # zeroing out a 3000 vector
 # x .= 0   -> 80ns
 # x .= Returns(0).(x) -> 110 ns
 # mapself_ti!(Returns(0), f) -> 33ns (how is this faster?)
-function mapself_ti!(op::F, dest::TensorIndex{IXT,N}) where {F,IXT,N}
-    copy_ti!(op, dest, dest) # TODO: maybe if we rewrite this it will be faster
-end
+#function mapself_ti!(op::F, dest::TensorIndex{IXT,N}) where {F,IXT,N}
 
 function materialize_ti(source::TensorIndex{IXT,N,T,AT}) where {IXT,N,T,AT}
     v = Array{T,N}(undef, source.shape...)
