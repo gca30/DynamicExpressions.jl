@@ -326,8 +326,6 @@ function eval_diff_tree_array_cpu(
     buffer::AbstractVector{T}
 ) where {T,N,IXT,AT,APT}
     
-    global cX2
-    cX2 = FlattenedTensorList(cX.B, cX.L, copy(cX.flattened), cX.positions)
     # println(string_debug_tree(tree, operators))
     output = make_ftl_from_tree(tree, buffer, cX.B, Val(true))
     # display(output)

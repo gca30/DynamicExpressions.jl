@@ -303,22 +303,30 @@ end
 
 BBB = 11
 
-# if false
-#     buffer .= 666
-#     BBB = 40_000
-#     #redo_thing()
-# else
+if false
+    buffer .= 666
+    BBB = 2000
+    redo_thing()
+else
     BBB = Int32(11)
-    while BBB < 40_000
+    while BBB < 100_000
         global BBB
         if BBB < 1000
             BBB = Int32(floor(BBB*1.1))
         else
             BBB = Int32(floor(BBB*1.05))
         end
-        redo_thing()
+        if false
+            print(BBB, " ")
+            xa = rand(20*BBB)
+            xb = rand(20*BBB)
+            xc = rand(20*BBB)
+            @time xa .= xb .* xc
+        else
+            redo_thing()
+        end
     end
-# end
+end
 
 # SOMETIMES THIS WHOLE THING DOESN'T WORK BBBECAUSE SHAPE_INFERENCE IS NOT DETERMINISTIC :'(
 # NOW IT WORKS BBBECAUSE WE RESHAPE THE CONSTANTS
