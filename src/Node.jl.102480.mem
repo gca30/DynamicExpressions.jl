@@ -1,0 +1,544 @@
+        - module NodeModule
+        - 
+        - using DispatchDoctor: @unstable
+        - 
+        - import ..OperatorEnumModule: AbstractOperatorEnum
+        - import ..UtilsModule: @memoize_on, @with_memoize, deprecate_varmap, Undefined
+        - 
+        - const DEFAULT_NODE_TYPE = Float32
+        - 
+        - """
+        -     AbstractNode
+        - 
+        - Abstract type for binary trees. Must have the following fields:
+        - 
+        - - `degree::Integer`: Degree of the node. Either 0, 1, or 2. If 1,
+        -     then `l` needs to be defined as the left child. If 2,
+        -     then `r` also needs to be defined as the right child.
+        - - `l::AbstractNode`: Left child of the current node. Should only be
+        -     defined if `degree >= 1`; otherwise, leave it undefined (see the
+        -     the constructors of [`Node{T}`](@ref) for an example).
+        -     Don't use `nothing` to represent an undefined value
+        -     as it will incur a large performance penalty.
+        - - `r::AbstractNode`: Right child of the current node. Should only
+        -     be defined if `degree == 2`.
+        - """
+        - abstract type AbstractNode end
+        - 
+        - """
+        -     AbstractScalarExprNode{T} <: AbstractNode
+        - 
+        - Abstract type for nodes that represent an expression.
+        - Along with the fields required for `AbstractNode`,
+        - this additionally must have fields for:
+        - 
+        - - `constant::Bool`: Whether the node is a constant.
+        - - `val::T`: Value of the node. If `degree==0`, and `constant==true`,
+        -     this is the value of the constant. It has a type specified by the
+        -     overall type of the `Node` (e.g., `Float64`).
+        - - `feature::UInt16`: Index of the feature to use in the
+        -     case of a feature node. Only used if `degree==0` and `constant==false`. 
+        -     Only defined if `degree == 0 && constant == false`.
+        - - `op::UInt8`: If `degree==1`, this is the index of the operator
+        -     in `operators.unaops`. If `degree==2`, this is the index of the
+        -     operator in `operators.binops`. In other words, this is an enum
+        -     of the operators, and is dependent on the specific `OperatorEnum`
+        -     object. Only defined if `degree >= 1`
+        - 
+        - # Interface
+        - 
+        - See [`NodeInterface`](@ref DynamicExpressions.InterfacesModule.NodeInterface) for a full description
+        - of the interface implementation, as well as tests to verify correctness.
+        - 
+        - You *must* define `CustomNode{_T} where {_T} = new{_T}()` for each custom node type,
+        - as well as `constructorof` and `with_type_parameters`.
+        - 
+        - In addition, you *may* choose to define the following functions, to override
+        - the defaults behavior, in particular if you wish to add additional fields
+        - to your type.
+        - 
+        - - `leaf_copy` and `branch_copy`
+        - - `leaf_convert` and `branch_convert`
+        - - `leaf_equal` and `branch_equal`
+        - - `leaf_hash` and `branch_hash`
+        - - `preserve_sharing`
+        - """
+        - abstract type AbstractExprNode{T} <: AbstractNode end
+        - abstract type AbstractScalarExprNode{T} <: AbstractExprNode{T} end
+        - 
+        - #! format: off
+        - """
+        -     Node{T} <: AbstractScalarExprNode{T}
+        - 
+        - Node defines a symbolic expression stored in a binary tree.
+        - A single `Node` instance is one "node" of this tree, and
+        - has references to its children. By tracing through the children
+        - nodes, you can evaluate or print a given expression.
+        - 
+        - # Fields
+        - 
+        - - `degree::UInt8`: Degree of the node. 0 for constants, 1 for
+        -     unary operators, 2 for binary operators.
+        - - `constant::Bool`: Whether the node is a constant.
+        - - `val::T`: Value of the node. If `degree==0`, and `constant==true`,
+        -     this is the value of the constant. It has a type specified by the
+        -     overall type of the `Node` (e.g., `Float64`).
+        - - `feature::UInt16`: Index of the feature to use in the
+        -     case of a feature node. Only used if `degree==0` and `constant==false`. 
+        -     Only defined if `degree == 0 && constant == false`.
+        - - `op::UInt8`: If `degree==1`, this is the index of the operator
+        -     in `operators.unaops`. If `degree==2`, this is the index of the
+        -     operator in `operators.binops`. In other words, this is an enum
+        -     of the operators, and is dependent on the specific `OperatorEnum`
+        -     object. Only defined if `degree >= 1`
+        - - `l::Node{T}`: Left child of the node. Only defined if `degree >= 1`.
+        -     Same type as the parent node.
+        - - `r::Node{T}`: Right child of the node. Only defined if `degree == 2`.
+        -     Same type as the parent node. This is to be passed as the right
+        -     argument to the binary operator.
+        - 
+        - # Constructors
+        - 
+        - 
+        -     Node([T]; val=nothing, feature=nothing, op=nothing, l=nothing, r=nothing, children=nothing, allocator=default_allocator)
+        -     Node{T}(; val=nothing, feature=nothing, op=nothing, l=nothing, r=nothing, children=nothing, allocator=default_allocator)
+        - 
+        - Create a new node in an expression tree. If `T` is not specified in either the type or the
+        - first argument, it will be inferred from the value of `val` passed or `l` and/or `r`.
+        - If it cannot be inferred from these, it will default to `Float32`.
+        - 
+        - The `children` keyword can be used instead of `l` and `r` and should be a tuple of children. This
+        - is to permit the use of splatting in constructors.
+        - 
+        - You may also construct nodes via the convenience operators generated by creating an `OperatorEnum`.
+        - 
+        - You may also choose to specify a default memory allocator for the node other than simply `Node{T}()`
+        - in the `allocator` keyword argument.
+        - """
+        - mutable struct Node{T} <: AbstractScalarExprNode{T}
+        -     degree::UInt8  # 0 for constant/variable, 1 for cos/sin, 2 for +/* etc.
+        -     constant::Bool  # false if variable
+        -     val::T  # If is a constant, this stores the actual value
+        -     # ------------------- (possibly undefined below)
+        -     feature::UInt16  # If is a variable (e.g., x in cos(x)), this stores the feature index.
+        -     op::UInt8  # If operator, this is the index of the operator in operators.binops, or operators.unaops
+        -     l::Node{T}  # Left child node. Only defined for degree=1 or degree=2.
+        -     r::Node{T}  # Right child node. Only defined for degree=2. 
+        - 
+        -     #################
+        -     ## Constructors:
+        -     #################
+        -     Node{_T}() where {_T} = new{_T}()
+        - end
+        - 
+        - 
+        - 
+        - """
+        -     AbstractTensorExprNode{T, N} <: AbstractNode{T}
+        - 
+        - Abstract type for nodes that represent an expression dealing with tensors.
+        - Compared to the the scalar version, the tensor expression nodes don't
+        - store their value directly in the node, but in an another flattened
+        - tensor array specifically used for constants.
+        - Along with the fields required for `AbstractNode`,
+        - this additionally must have fields for:
+        - - `constant::Bool`
+        - - `feature::UInt16`
+        - - `op::UInt8`
+        - - TODO
+        - 
+        - """
+        - abstract type AbstractTensorExprNode{T,N} <: AbstractExprNode{T} end
+        - 
+        - """
+        -     TensorNode{T,N} <: AbstractTensorExprNode{T,N}
+        - 
+        - Default implementation of AbstractTensorExprNode{T,N}.
+        - 
+        - # Constructors
+        - 
+        - - `TensorNode[{T[,N]}]([N[, T]]; constant=nothing, feature=nothing, op=nothing, l=nothing, r=nothing, children=nothing, allocator=default_allocator)`
+        - 
+        - """
+        - mutable struct TensorNode{T,N} <: AbstractTensorExprNode{T,N}
+        -     degree::UInt8 
+        -         # 0 for constant/variable
+        -         # 1 for cos/sin
+        -         # 2 for +/* etc.
+        -     constant::Bool 
+        -         # If it is a leaf node, stores whether it is a constant or a variable
+        -         # If not, stores whether there is any constant down the tree
+        -     feature::UInt16 
+        -         # This stores the feature index for inputs 
+        -         # the index in the constants array for constants
+        -         # the index in the temporary array for non-leaf nodes
+        -     shape::NTuple{N,Int32} 
+        -         # The shape of the output
+        - 
+        -     # ------------------- (possibly undefined below)
+        -     index::Int16 # the index (including constants and variables)
+        - 
+        -     grad_ix::Int16 
+        -         # index of the gradient in the flattened temporary array
+        -     op::UInt8  
+        -         # If operator, this is the index of the operator in operators.binops, or operators.unaops
+        -     l::TensorNode{T,N}  
+        -         # Left child node. Only defined for degree=1 or degree=2.
+        -     r::TensorNode{T,N}  
+        -         # Right child node. Only defined for degree=2.
+        -     
+        -     TensorNode{_T,_N}() where {_T,_N} = new{_T,_N}()
+        - end
+        - 
+        - """
+        -     GraphNode{T} <: AbstractScalarExprNode{T}
+        - 
+        - Exactly the same as [`Node{T}`](@ref), but with the assumption that some
+        - nodes will be shared. All copies of this graph-like structure will
+        - be performed with this assumption, to preserve structure of the graph.
+        - 
+        - # Examples
+        - 
+        - ```julia
+        - julia> operators = OperatorEnum(;
+        -            binary_operators=[+, -, *], unary_operators=[cos, sin]
+        -         );
+        - 
+        - julia> x = GraphNode(feature=1)
+        - x1
+        - 
+        - julia> y = sin(x) + x
+        - sin(x1) + {x1}
+        - 
+        - julia> cos(y) * y
+        - cos(sin(x1) + {x1}) * {(sin(x1) + {x1})}
+        - ```
+        - 
+        - Note how the `{}` indicates a node is shared, and this
+        - is the same node as seen earlier in the string.
+        - 
+        - This has the same constructors as [`Node{T}`](@ref). Shared nodes
+        - are created simply by using the same node in multiple places
+        - when constructing or setting properties.
+        - """
+        - 
+        - mutable struct GraphNode{T} <: AbstractScalarExprNode{T}
+        -     degree::UInt8  # 0 for constant/variable, 1 for cos/sin, 2 for +/* etc.
+        -     constant::Bool  # false if variable
+        -     val::T  # If is a constant, this stores the actual value
+        -     # ------------------- (possibly undefined below)
+        -     feature::UInt16  # If is a variable (e.g., x in cos(x)), this stores the feature index.
+        -     op::UInt8  # If operator, this is the index of the operator in operators.binops, or operators.unaops
+        -     l::GraphNode{T}  # Left child node. Only defined for degree=1 or degree=2.
+        -     r::GraphNode{T}  # Right child node. Only defined for degree=2.
+        - 
+        -     GraphNode{_T}() where {_T} = new{_T}()
+        - end
+        - 
+        - ################################################################################
+        - #! format: on
+        - 
+        - Base.eltype(::Type{<:AbstractScalarExprNode{T}}) where {T} = T
+        - Base.eltype(::AbstractScalarExprNode{T}) where {T} = T
+        - Base.eltype(::Type{<:AbstractTensorExprNode{T}}) where {T} = T
+        - Base.eltype(::AbstractTensorExprNode{T}) where {T} = T
+        - 
+        - @unstable constructorof(::Type{N}) where {N<:AbstractNode} = Base.typename(N).wrapper
+        - @unstable constructorof(::Type{<:Node}) = Node
+        - @unstable constructorof(::Type{<:TensorNode}) = TensorNode
+        - @unstable constructorof(::Type{<:GraphNode}) = GraphNode
+        - 
+        - function with_type_parameters(::Type{N}, ::Type{T}) where {N<:AbstractScalarExprNode,T}
+        -     return constructorof(N){T}
+        - end
+        - function with_type_parameters(::Type{NodeT}, ::Type{T}, ::Val{NumDims}) where {NodeT<:AbstractTensorExprNode,T,NumDims}
+        -     return constructorof(NodeT){T,NumDims}
+        - end
+        - with_type_parameters(::Type{<:Node}, ::Type{T}) where {T} = Node{T}
+        - with_type_parameters(::Type{<:TensorNode}, ::Type{T}, ::Val{N}) where {T,N} = TensorNode{T,N}
+        - with_type_parameters(::Type{<:GraphNode}, ::Type{T}) where {T} = GraphNode{T}
+        - 
+        - function default_allocator(::Type{N}, ::Type{T}) where {N<:AbstractScalarExprNode,T}
+        -     return with_type_parameters(N, T)()
+        - end
+        - default_allocator(::Type{<:Node}, ::Type{T}) where {T} = Node{T}()
+        - default_allocator(::Type{<:TensorNode}, ::Type{T}, ::Val{N}) where {T,N} = TensorNode{T,N}()
+        - default_allocator(::Type{<:GraphNode}, ::Type{T}) where {T} = GraphNode{T}()
+        - 
+        - """Trait declaring whether nodes share children or not."""
+        - preserve_sharing(::Union{Type{<:AbstractNode},AbstractNode}) = false
+        - preserve_sharing(::Union{Type{<:Node},Node}) = false
+        - preserve_sharing(::Union{Type{<:TensorNode},TensorNode}) = false
+        - preserve_sharing(::Union{Type{<:GraphNode},GraphNode}) = true
+        - 
+        - include("base.jl")
+        - 
+        - #! format: off
+        - @inline function (::Type{N})(
+        -     ::Type{T1}=Undefined; val=nothing, feature=nothing, op=nothing, l=nothing, r=nothing, children=nothing, allocator::F=default_allocator,
+        - ) where {T1,N<:AbstractScalarExprNode,F}
+        -     validate_not_all_defaults(N, val, feature, op, l, r, children)
+        -     if children !== nothing
+        -         @assert l === nothing && r === nothing
+        -         if length(children) == 1
+        -             return node_factory(N, T1, val, feature, op, only(children), nothing, allocator)
+        -         else
+        -             return node_factory(N, T1, val, feature, op, children..., allocator)
+        -         end
+        -     end
+        -     return node_factory(N, T1, val, feature, op, l, r, allocator)
+        - end
+        - function validate_not_all_defaults(::Type{N}, val, feature, op, l, r, children) where {N<:AbstractScalarExprNode}
+        -     return nothing
+        - end
+        - function validate_not_all_defaults(::Type{N}, val, feature, op, l, r, children) where {T,N<:AbstractScalarExprNode{T}}
+        -     if val === nothing && feature === nothing && op === nothing && l === nothing && r === nothing && children === nothing
+        -         error(
+        -             "Encountered the call for $N() inside the generic constructor. "
+        -             * "Did you forget to define `$(Base.typename(N).wrapper){T}() where {T} = new{T}()`?"
+        -         )
+        -     end
+        -     return nothing
+        - end
+        - 
+      432 @inline function (::Type{NodeT})(
+        -     arg1::Union{Integer, Val{N}}=Val(0), arg2::Type{T1}=Undefined; feature=nothing, constant=nothing, op=nothing, l::Union{Nothing,AbstractTensorExprNode}=nothing, r=nothing, children=nothing, allocator::F=default_allocator,
+        - ) where {T1,NodeT<:AbstractTensorExprNode,F,N}
+        -     N0 = arg1 isa Integer ? arg1 : N
+        -     TT = if l !== nothing
+        -         if r !== nothing
+        -             promote_type(
+        -                 typeof(l).parameters[1],
+        -                 typeof(r).parameters[1]
+        -             )
+        -         else
+        -             typeof(l).parameters[1]
+        -         end
+        -     elseif !(NodeT isa UnionAll)
+        -         NodeT.parameters[1]
+        -     elseif !(NodeT.body isa UnionAll)
+        -         NodeT.body.parameters[1]
+        -     elseif arg2 !== Udefined
+        -         T1
+        -     else
+        -         Undefined
+        -     end
+        -     NN = if l !== nothing
+        -         typeof(l).parameters[2]
+        -     elseif !(NodeT isa UnionAll)
+        -         NodeT.parameters[2]
+        -     elseif N0 != 0
+        -         N0
+        -     else
+        -         
+        -     end
+        - 
+        -     if TT === Undefined && NN == 0
+        -         # Dummy node!
+        -         error("Unspecified $NodeT constructor")
+        -     elseif TT === Undefined
+        -         error("Type not specified in $NodeT constructor")
+        -     elseif NN == 0
+        -         error("Number of dimensions not specified in $NodeT constructor")
+        -     else
+        -         validate_not_all_defaults(NodeT, Val(NN), constant, feature, op, l, r, children)
+        -     end
+        - 
+        -     if children !== nothing
+        -         @assert l === nothing && r === nothing
+        -         if length(children) == 1
+        -             return tensor_node_factory(NodeT, Val(NN), TT, constant, feature, op, only(children), nothing, allocator)
+        -         else
+        -             return tensor_node_factory(NodeT, Val(NN), TT, constant, feature, op, children..., allocator)
+        -         end
+        -     end
+        -     return tensor_node_factory(NodeT, Val(NN), TT, constant, feature, op, l, r, allocator)
+        - end
+        - function validate_not_all_defaults(::Type{NodeT}, ::Val{N1}, constant, feature, op, l, r, children) where {NodeT<:AbstractTensorExprNode,N1}
+        -     if constant === nothing && feature === nothing && op === nothing && l === nothing && r === nothing && children === nothing
+        -         error(
+        -             "Encountered the call for $NodeT() inside the generic constructor. "
+        -             * "Did you forget to define `$(Base.typename(N).wrapper){T}() where {T} = new{T}()`?"
+        -         )
+        -     end
+        -     return nothing
+        - end
+        - 
+        - """Create a constant/variable leaf."""
+        - @inline function tensor_node_factory(
+        -     ::Type{NodeT}, ::Val{N}, ::Type{T}, constant::Bool, feature::Integer, ::Nothing, ::Nothing, ::Nothing, allocator::F,
+        - ) where {NodeT<:AbstractTensorExprNode,N,T,F}
+        -     n = allocator(NodeT, T, Val(N))
+        -     n.degree = 0
+        -     n.constant = constant
+        -     n.feature = feature
+        -     return n
+        - end
+        - """Create a unary operator node."""
+        - @inline function tensor_node_factory(
+        -     ::Type{NodeT}, ::Val{N}, ::Type{T}, ::Nothing, ::Nothing, op::Integer, l::AbstractTensorExprNode{T2,N}, ::Nothing, allocator::F,
+        - ) where {N,NodeT<:AbstractTensorExprNode,T,T2,F}
+        -     @assert l isa NodeT
+        -     n = allocator(NodeT, T, Val(N))
+        -     n.degree = 1
+        -     n.op = op
+        -     n.l = l
+        -     return n
+        - end
+        - """Create a binary operator node."""
+        - @inline function tensor_node_factory(
+        -     ::Type{NodeT}, ::Val{N}, ::Type{T}, ::Nothing, ::Nothing, op::Integer, l::AbstractTensorExprNode{T2,N}, r::AbstractTensorExprNode{T3,N}, allocator::F,
+        - ) where {N,NodeT<:AbstractTensorExprNode,T,T2,T3,F}
+        -     n = allocator(NodeT, T, Val(N))
+        -     n.degree = 2
+        -     n.op = op
+        -     n.l = T2 === T ? l : convert(with_type_parameters(NodeT, T, Val(N)), l)
+        -     n.r = T3 === T ? r : convert(with_type_parameters(NodeT, T, Val(N)), r)
+        -     return n
+        - end
+        - 
+        - """Create a constant leaf."""
+        - @inline function node_factory(
+        -     ::Type{N}, ::Type{T1}, val::T2, ::Nothing, ::Nothing, ::Nothing, ::Nothing, allocator::F,
+        - ) where {N<:AbstractScalarExprNode,T1,T2,F}
+        -     T = node_factory_type(N, T1, T2)
+        -     n = allocator(N, T)
+        -     n.degree = 0
+        -     n.constant = true
+        -     n.val = convert(T, val)
+        -     return n
+        - end
+        - """Create a variable leaf, to store data."""
+        - @inline function node_factory(
+        -     ::Type{N}, ::Type{T1}, ::Nothing, feature::Integer, ::Nothing, ::Nothing, ::Nothing, allocator::F,
+        - ) where {N<:AbstractScalarExprNode,T1,F}
+        -     T = node_factory_type(N, T1, DEFAULT_NODE_TYPE)
+        -     n = allocator(N, T)
+        -     n.degree = 0
+        -     n.constant = false
+        -     n.feature = feature
+        -     return n
+        - end
+        - """Create a unary operator node."""
+        - @inline function node_factory(
+        -     ::Type{N}, ::Type{T1}, ::Nothing, ::Nothing, op::Integer, l::AbstractScalarExprNode{T2}, ::Nothing, allocator::F,
+        - ) where {N<:AbstractScalarExprNode,T1,T2,F}
+        -     @assert l isa N
+        -     T = T2  # Always prefer existing nodes, so we don't mess up references from conversion
+        -     n = allocator(N, T)
+        -     n.degree = 1
+        -     n.op = op
+        -     n.l = l
+        -     n.constant = l.constant
+        -     return n
+        - end
+        - """Create a binary operator node."""
+        - @inline function node_factory(
+        -     ::Type{N}, ::Type{T1}, ::Nothing, ::Nothing, op::Integer, l::AbstractScalarExprNode{T2}, r::AbstractScalarExprNode{T3}, allocator::F,
+        - ) where {N<:AbstractScalarExprNode,T1,T2,T3,F}
+        -     T = promote_type(T2, T3)
+        -     n = allocator(N, T)
+        -     n.degree = 2
+        -     n.op = op
+        -     n.l = T2 === T ? l : convert(with_type_parameters(N, T), l)
+        -     n.r = T3 === T ? r : convert(with_type_parameters(N, T), r)
+        -     n.constant = l.constant || r.constant
+        -     return n
+        - end
+        - 
+        - @inline function node_factory_type(::Type{N}, ::Type{T1}, ::Type{T2}) where {N,T1,T2}
+        -     if T1 === Undefined && N isa UnionAll
+        -         T2
+        -     elseif T1 === Undefined
+        -         eltype(N)
+        -     elseif N isa UnionAll
+        -         T1
+        -     else
+        -         eltype(N)
+        -     end
+        - end
+        - #! format: on
+        - 
+        - function (::Type{N})(
+        -     op::Integer, l::AbstractScalarExprNode
+        - ) where {N<:AbstractScalarExprNode}
+        -     return N(; op=op, l=l)
+        - end
+        - function (::Type{N})(
+        -     op::Integer, l::AbstractScalarExprNode, r::AbstractScalarExprNode
+        - ) where {N<:AbstractScalarExprNode}
+        -     return N(; op=op, l=l, r=r)
+        - end
+        - function (::Type{N})(
+        -     op::Integer, l::AbstractTensorExprNode
+        - ) where {N<:AbstractTensorExprNode}
+        -     return N(; op=op, l=l)
+        - end
+        - function (::Type{N})(
+        -     op::Integer, l::AbstractTensorExprNode, r::AbstractTensorExprNode
+        - ) where {N<:AbstractTensorExprNode}
+        -     return N(; op=op, l=l, r=r)
+        - end
+        - function (::Type{N})(var_string::String) where {N<:AbstractScalarExprNode}
+        -     Base.depwarn(
+        -         "Creating a node using a string is deprecated and will be removed in a future version.",
+        -         :string_tree,
+        -     )
+        -     return N(; feature=parse(UInt16, var_string[2:end]))
+        - end
+        - function (::Type{N})(
+        -     var_string::String, variable_names::AbstractVector{String}
+        - ) where {N<:AbstractScalarExprNode}
+        -     i = findfirst(==(var_string), variable_names)::Int
+        -     return N(; feature=i)
+        - end
+        - 
+        - function Base.promote_rule(::Type{Node{T1}}, ::Type{Node{T2}}) where {T1,T2}
+        -     return Node{promote_type(T1, T2)}
+        - end
+        - function Base.promote_rule(::Type{TensorNode{T1,N}}, ::Type{TensorNode{T2,N}}) where {T1,T2,N}
+        -     return TensorNode{promote_type(T1, T2), N}
+        - end
+        - function Base.promote_rule(::Type{GraphNode{T1}}, ::Type{Node{T2}}) where {T1,T2}
+        -     return GraphNode{promote_type(T1, T2)}
+        - end
+        - function Base.promote_rule(::Type{GraphNode{T1}}, ::Type{GraphNode{T2}}) where {T1,T2}
+        -     return GraphNode{promote_type(T1, T2)}
+        - end
+        - 
+        - # TODO: Verify using this helps with garbage collection
+        - create_dummy_node(::Type{N}) where {N<:AbstractExprNode} = N()
+        - 
+        - """
+        -     set_node!(tree::AbstractScalarExprNode{T}, new_tree::AbstractScalarExprNode{T}) where {T}
+        - 
+        - Set every field of `tree` equal to the corresponding field of `new_tree`.
+        - """
+        - function set_node!(tree::AbstractExprNode, new_tree::AbstractExprNode)
+        -     # First, ensure we free some memory:
+        -     if new_tree.degree < 2 && tree.degree == 2
+        -         tree.r = create_dummy_node(typeof(tree))
+        -     end
+        -     if new_tree.degree < 1 && tree.degree >= 1
+        -         tree.l = create_dummy_node(typeof(tree))
+        -     end
+        - 
+        -     tree.degree = new_tree.degree
+        -     if new_tree.degree == 0
+        -         tree.constant = new_tree.constant
+        -         if tree isa AbstractScalarExprNode && new_tree isa AbstractScalarExprNode && new_tree.constant
+        -             tree.val = new_tree.val::eltype(new_tree)
+        -         else
+        -             tree.feature = new_tree.feature
+        -         end
+        -     else
+        -         tree.op = new_tree.op
+        -         tree.l = new_tree.l
+        -         if new_tree.degree == 2
+        -             tree.r = new_tree.r
+        -         end
+        -     end
+        -     return nothing
+        - end
+        - 
+        - end

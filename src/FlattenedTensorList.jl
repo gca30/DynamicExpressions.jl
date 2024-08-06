@@ -245,7 +245,7 @@ function _mapkv_ti!(op::F, dest::TensorIndex{IXT,N}, ::Val{V}, sources::Vararg{T
     end
     
     iterlen = prod(itershape)
-    ii = MVector{N-V,IXT}(ntuple(Returns(1), Val(N)))
+    ii = MVector{N-V,IXT}(ntuple(Returns(1), Val(N-V)))
     # why can't julia have static mutable arrays on the stack??
     # we will have to do this janky thing
     
@@ -290,7 +290,7 @@ function _mapkv_ti!(op::F, dest::TensorIndex{IXT,N}, ::Val{V}, sources::Vararg{T
         ii[1] += 1
         dinar += djumps[1]
         for kx in 1:K
-            sinar[kx] += sjumps[kx,1]
+            @inbounds sinar[kx] += @inbounds sjumps[kx,1]
         end
 
         nx = 1
@@ -316,7 +316,7 @@ function _mapkv_ti!(op::F, dest::TensorIndex{IXT,N}, ::Val{V}, sources::Vararg{T
 
 end
 
-function _mapk_ti!(op::F, dest::TensorIndex{IXT,N}, sources::Vararg{TensorIndex{IXT,N}, K}) where {F,V,IXT,N,K}
+function _mapk_ti!(op::F, dest::TensorIndex{IXT,N}, sources::Vararg{TensorIndex{IXT,N}, K}) where {F,IXT,N,K}
     
     itershape = ntuple(nx -> max(dest.shape[nx], maximum(source -> source.shape[nx], sources; init=0)), Val(N))
 
@@ -341,7 +341,7 @@ function _mapk_ti!(op::F, dest::TensorIndex{IXT,N}, sources::Vararg{TensorIndex{
     for nx in 2:N
         djumps[nx] = (dest.shape[nx] == itershape[nx] ? dest.strides[nx] : 0) - (dest.shape[nx-1] == itershape[nx-1] ? dest.shape[nx-1]*dest.strides[nx-1] : 0)
         for kx in 1:K
-            sjumps[kx,nx] = (sources[kx].shape[nx] == itershape[nx] ? sources[kx].strides[nx] : 0) - (sources[kx].shape[nx-1] == itershape[nx-1] ? sources[kx].shape[nx-1]*sources[kx].strides[nx-1] : 0)
+            @inbounds sjumps[kx,nx] = (sources[kx].shape[nx] == itershape[nx] ? sources[kx].strides[nx] : 0) - (sources[kx].shape[nx-1] == itershape[nx-1] ? sources[kx].shape[nx-1]*sources[kx].strides[nx-1] : 0)
         end
     end
     #display(dest)
@@ -353,7 +353,7 @@ function _mapk_ti!(op::F, dest::TensorIndex{IXT,N}, sources::Vararg{TensorIndex{
         i += 1
         #@show dinar, sinar, ii
 
-        dest.ar[dinar] = op(
+        @inbounds dest.ar[dinar] = op(
             (@inbounds dest.ar[dinar]),
             ntuple(kx -> (@inbounds sources[kx].ar[sinar[kx]]), Val(K))...
         )
@@ -365,7 +365,7 @@ function _mapk_ti!(op::F, dest::TensorIndex{IXT,N}, sources::Vararg{TensorIndex{
         ii[1] += 1
         dinar += djumps[1]
         for kx in 1:K
-            sinar[kx] += sjumps[kx,1]
+            sinar[kx] += @inbounds sjumps[kx,1]
         end
 
         nx = 1
@@ -374,7 +374,7 @@ function _mapk_ti!(op::F, dest::TensorIndex{IXT,N}, sources::Vararg{TensorIndex{
             @inbounds ii[nx] = 1
             dinar += @inbounds djumps[nx+1]
             for kx in 1:K
-                sinar[kx] += @inbounds sjumps[kx,nx+1]
+                @inbounds sinar[kx] += @inbounds sjumps[kx,nx+1]
             end
             nx+=1
         end
@@ -391,7 +391,14 @@ function _mapk_ti!(op::F, dest::TensorIndex{IXT,N}, sources::Vararg{TensorIndex{
 
 end
 
+@inline function _mapk_full_ti!(op::F, dest::TensorIndex{IXT,N}, sources::Vararg{TensorIndex{IXT,N},K}) where {F,IXT,N,K}
+    for j in 1:length(dest)
+        @inbounds dest.ar[dest.offset+j] = op(@inbounds dest.ar[dest.offset+j], ntuple(kx -> (@inbounds sources[kx].ar[sources[kx].offset+j]), Val(K))...)
+    end
+end
+
 @generated function mapk_ti!(op::F, dest::TensorIndex{IXT,N}, sources::Vararg{TensorIndex{IXT,N},K}) where {F,IXT,N,K}
+    #_mapk_ti!(op, dest, sources...)
     return quote if K == 0
         cd = continuous_dims(dest)
         if cd == 0
@@ -410,12 +417,9 @@ end
         if cd == 0
             return _mapk_ti!(op, dest, sources...)
         elseif cd == N
-            for j in 1:length(dest)
-                #@inbounds dest.ar[dest.offset+j] = op(@inbounds dest.ar[dest.offset+j], ntuple(kx -> @inbounds sources[kx].ar[sources[kx].offset+j], Val(K))...)
-            end
-            return nothing
+            return _mapk_full_ti!(op, dest, sources...)
         else
-            #Base.@nif($N, i -> cd == i, i -> _mapkv_ti!(op, dest, Val(i), sources...))
+            Base.@nif($N, i -> cd == i, i -> _mapkv_ti!(op, dest, Val(i), sources...))
             return nothing
         end
     end end

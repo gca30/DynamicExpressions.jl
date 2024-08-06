@@ -309,7 +309,7 @@ if false
     redo_thing()
 else
     BBB = Int32(11)
-    while BBB < 100_000
+    while BBB < 1000_000
         global BBB
         if BBB < 1000
             BBB = Int32(floor(BBB*1.1))
