@@ -139,7 +139,7 @@ end
 # ----------------------
 
 function solve_dioph(c::Constraint, cb::CombinedConstraints, constsMap::CombinedConstraints, axc::Integer)
-    error("solve_dioph not yet implemented")
+    # error("solve_dioph not yet implemented")
     # EARLIER IMPLEMENTATION:
     # cnt = count(!=(0), @view(result[2:end]))
     # temp = Vector{MVector{4, Int32}}(undef, cnt)
@@ -932,8 +932,11 @@ function reshape_inference(te::AbstractTensorExpression, args...; kwargs...)
     if r == false
         return false
     end
-    recalculate_node_values!(get_tree(te), get_constants(te))
-    set_constants(te, reshape_constants(get_tree(te), get_constants(te)))
+    new_constants = recalculate_node_values!(get_tree(te), get_constants(te))
+    set_constants(te, new_constants)
+    new_constants = reshape_constants(get_tree(te), get_constants(te))
+    set_constants(te, new_constants)
+    return true
 end
 
 end

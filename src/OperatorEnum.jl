@@ -28,7 +28,7 @@ struct GenericOperatorEnum{B,U} <: AbstractOperatorEnum
     unaops::U
 end
 
-struct TensorOperator{Finplace,Fgrad,Fconstr,Fcompl}
+struct TensorOperator{Finplace,Fgrad,Fconstr,Fcompl,Fgpum}
     symbol_name::Symbol
         # the name of the operator
     # op::Fdirect
@@ -37,6 +37,7 @@ struct TensorOperator{Finplace,Fgrad,Fconstr,Fcompl}
         # does the operation and puts the result into z
         # (l,[ r,] res) -> Nothing
         # inputs are arrays
+    gpu_metadata::Fgpum
     # op_gpu_config::Fgpuc
         # !!! return the gpu config (probably the number of threads)
         # ...
@@ -59,8 +60,8 @@ struct TensorOperator{Finplace,Fgrad,Fconstr,Fcompl}
         # (sl[, sr]) -> Int64
         # inputs are NTuple{N, Int64}
 
-    TensorOperator(; symbol_name, op!::F1, gradient!::F2, push_constraints!::F3, complexity::F4) where {F1,F2,F3,F4} = 
-        new{F1,F2,F3,F4}(symbol_name, op!, gradient!, push_constraints!, complexity)
+    TensorOperator(; symbol_name, op!::F1, gradient!::F2, push_constraints!::F3, complexity::F4, gpu_metadata::F5) where {F1,F2,F3,F4,F5} = 
+        new{F1,F2,F3,F4,F5}(symbol_name, op!, gpu_metadata, gradient!, push_constraints!, complexity)
 end
 
 """

@@ -7,7 +7,7 @@ using DynamicExpressions.FlattenedTensorListModule: FlattenedTensorList, treat_a
 using DynamicExpressions.OperatorEnumConstructionModule: @extend_operators
 using DynamicExpressions.TensorOperatorsModule: broadcast_binop, broadcast_unaop, op_mm, op_conv, op_mse_loss, op_T
 using DynamicExpressions.ShapeInferenceModule: reshape_inference
-using DynamicExpressions.EvaluateTensorsModule: eval_diff_tree_array_cpu, eval_tree_array_cpu
+using DynamicExpressions.EvaluateTensorsModule: eval_diff_tree_array_cpu, eval_tree_array_cpu, eval_diff_tree_array_gpu
 using DynamicExpressions.StringsModule: string_debug_tree
 using DynamicExpressions.TensorExpressionModule: make_tensor_expression, set_constants
 
@@ -99,7 +99,9 @@ function redo_thing()
     # later this will have a specific shape generator
     constants = flatten(Vector{Float32}, [rand(Float32, 2, 4, 1, 1), rand(Float32, 2, 4, 1, 1)])
     set_constants(te, constants)
-    reshape_inference(te, cX)
+    while te.tree.l.l.shape[1] != 4
+        reshape_inference(te, cX)
+    end
 
     #println("OK, now we run")
     print(BBB, " ")
@@ -108,10 +110,24 @@ end
 
 BBB = 11
 
-if false
-    buffer .= 666
-    BBB = 2000
-    redo_thing()
+if true
+    # buffer .= 666
+    # BBB = 2000
+    # redo_thing()
+
+    for i in 1:5
+        tei = make_tensor_expression(trees[i], cX, operators)
+        if !reshape_inference(tei, cX)
+            continue
+        end
+        eval_diff_tree_array_gpu(trees[i], constants, operators,  cX, reducer_op,       buffer)
+        println()
+    end
+    # eval_diff_tree_array_gpu(trees[2], constants, operators,  cX, reducer_op,       buffer)
+    # eval_diff_tree_array_gpu(trees[3], constants, operators,  cX, reducer_op,       buffer)
+    # eval_diff_tree_array_gpu(trees[4], constants, operators,  cX, reducer_op,       buffer)
+    # eval_diff_tree_array_gpu(trees[5], constants, operators,  cX, reducer_op,       buffer)
+
 else
     BBB = Int32(11)
     while BBB < 1000_000
@@ -123,10 +139,10 @@ else
         end
         if false
             print(BBB, " ")
-            xa = rand(20*BBB)
-            xb = rand(20*BBB)
-            xc = rand(20*BBB)
-            @time xa .= xb .* xc
+            xa = rand(20*BBB+1)
+            xb = rand(20*BBB+1)
+            xc = rand(20*BBB+1)
+            @time @view(xa[1:(20*BBB)]) .= @view(xb[1:(20*BBB)]) .* @view(xc[1:(20*BBB)])
         else
             redo_thing()
         end

@@ -15,17 +15,18 @@ import ..NodeModule:
     filter_map
 import ..FlattenedTensorListModule:
     FlattenedTensorList,
-    permute_features!,
+    permute_features,
     treat_as_flattened,
     feature_flat,
     copyto_ti!,
     mapk_ti!,
+    feature,
     selectdim_ti
 using ..NodeUtilsModule:
     count_constant_nodes,
     is_node_constant
 
-function recalculate_constant_indices!(tree::AbstractTensorExprNode{T,N}, constants::FlattenedTensorList{T,N}) where {T,N}
+function recalculate_constant_indices(tree::AbstractTensorExprNode{T,N}, constants::FlattenedTensorList{T,N}) where {T,N}
     function recurse(node, cindex, v)
         if node.degree == 2
             cindex = recurse(node.l, cindex, v)
@@ -44,10 +45,10 @@ function recalculate_constant_indices!(tree::AbstractTensorExprNode{T,N}, consta
     recurse(tree, 1, v)
     for i in eachindex(v)
         if i != v[i]
-            permute_features!(constants, v)
-            return
+            return permute_features(constants, v)
         end
     end
+    return constants
 end
 
 # renumbers the nodes to be from 1 to the number of temporary nodes (meaning inputs and constants are not numbered)
@@ -111,10 +112,11 @@ function recalculate_gradient_indices!(tree::AbstractTensorExprNode)
 end
 
 function recalculate_node_values!(tree::AbstractTensorExprNode{T,N}, constants::FlattenedTensorList{T,N}) where {T,N}
-    recalculate_constant_indices!(tree, constants)
+    new_constants = recalculate_constant_indices(tree, constants)
     recalculate_constant!(tree)
     recalculate_node_indices!(tree)
     recalculate_gradient_indices!(tree)
+    return new_constants
 end
 
 function make_ftl_from_tree(tree::AbstractTensorExprNode{T,N}, buffer::AbstractVector{T}, maxB, ::Val{with_gradients}) where {T,N,with_gradients}
@@ -169,7 +171,7 @@ function reshape_constants(tree::AbstractTensorExprNode{T,N}, constants::Flatten
         elseif new_len == old_len
             mapk_ti!((_,b)->b, feature_flat(consts2, ci), feature_flat(constants, ci))
         elseif new_len < old_len
-            mapk_ti!((_,b)->b, feature_flat(consts2, ci), selectdim_ti(feature_flat(constants, ci), 1:new_len))
+            mapk_ti!((_,b)->b, feature_flat(consts2, ci), selectdim_ti(feature_flat(constants, ci), 1, 1:new_len))
         else
             off = 0
             while off <= new_len

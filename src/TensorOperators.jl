@@ -22,6 +22,7 @@ broadcast_unaop(op::Fnum; op_complexity=1, symbol::Union{Symbol, Nothing}=nothin
     # (l, res) -> (@. res = op(l)),
     gradient! = (res, ∂res, l, ∂l) -> mapk_ti!((dlt, lt, rest) -> gradient(op, lt)*rest, ∂l, l, ∂res),
     push_constraints! = push_constraints_broadcast,
+    gpu_metadata = (sl) -> (1, 1), 
     complexity = sl -> length(sl) * op_complexity
 )
 
@@ -38,6 +39,7 @@ broadcast_binop(op::Fnum ; op_complexity=1, symbol::Union{Symbol, Nothing}=nothi
         end
     end,
     push_constraints! = push_constraints_broadcast,
+    gpu_metadata = (sl, sr) -> (1, 1, 1),
     complexity = (sl, sr) -> 
         prod(ntuple(i -> max(sl[i], sr[i]), Val(length(sl)))) * op_complexity
 )
@@ -59,6 +61,7 @@ op_mse_loss = TensorOperator(;
             push!(cs, @make_constraint((resoff+nx, loff+nx, roff+nx), (1, n, n)))
         end
     end,
+    gpu_metadata = (sl) -> (1, 1),
     complexity = (sl, sr) -> prod(sl)
 )
 
@@ -88,6 +91,7 @@ op_mm = TensorOperator(;
         end
         #@show materialize_ti(selectdim_ti(res, NP1, 1:100))
     end,
+    gpu_metadata = (sl, sr) -> (1, 1, 1),
     gradient! = function(res::TensorIndex{IXT,N,T}, dres, l, dl, r, dr, ::Val{comp}) where {comp,IXT,N,T}
         if comp & 0b01 != 0 # right
             # DR = L^T DRES
@@ -122,6 +126,7 @@ op_conv = TensorOperator(;
     op! = function(res, l, r)
         # res .= rand(size(res)...)
     end,
+    gpu_metadata = (sl, sr) -> (1, 1, 1),
     gradient! = function(res, dres, l, dl, r, dr, ::Val{comp}) where {comp}
         # TODO: implement this and op!
     end,
@@ -140,6 +145,7 @@ op_T = TensorOperator(;
         #permutedims!(res, l, ntuple(i -> i<3 ? 3-i : i, Val(N)))
         # TODO: implement this
     end,
+    gpu_metadata = sl -> (1, 1),
     gradient! = function(res, dres, l, dl)
         #permutedims!(dl, dres, ntuple(i -> i<3 ? 3-i : i, Val(N)))
     end,

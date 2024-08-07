@@ -542,32 +542,31 @@ end
 
 function permute_features(ftl::FlattenedTensorList{T,N,IXT,AT,APT}, features::AbstractVector{IXT}) where {T,N,IXT,AT,APT}
     B = ftl.B
-    l = sum(idx -> ftl.positions[idx][2], features)
+    l = sum(idx -> ftl.positions[idx].len, features)
     reordered = AT(undef, B*l)
     positions = APT(undef, length(features))
-    position = 0
+    position = zero(IXT)
     for i in eachindex(features)
-        positions[i] = ftl.positions[features[i]]
-        positions[i].offset = position
+        positions[i] = FTLPositionInfo(position, ftl.positions[features[i]].len, ftl.positions[features[i]].shape, ftl.positions[features[i]].strides)
         position += positions[i].len
     end
     newftl = FlattenedTensorList{T,N,IXT,AT,APT}(B, l, reordered, positions)
     for i in eachindex(features)
-        copy_ti!(feature_flat(newftl, i), feature_flat(ftl, features[i]))
+        copyto_ti!(feature_flat(newftl, i), feature_flat(ftl, features[i]))
         # @view(reshape(@view(reordered[:]), (l,B))[(position+1):(position+size), :]) .= 
         #     @view(reshape(@view(ftl.flattened[:]), (ftl.L, ftl.B))[(old_pos+1):(old_pos+size), :])
     end
     return newftl
 end
 
-function permute_features!(ftl::FlattenedTensorList, features::AbstractVector)
-    ftl2 = permute_features(ftl, features)
-    ftl.flattened = ftl2.flattened
-    ftl.positions = ftl2.positions
-    ftl.L = ftl2.L
-    ftl.B = ftl2.B
-    return ftl
-end
+# function permute_features!(ftl::FlattenedTensorList, features::AbstractVector)
+#     ftl2 = permute_features(ftl, features)
+#     ftl.flattened = ftl2.flattened
+#     ftl.positions = ftl2.positions
+#     ftl.L = ftl2.L
+#     ftl.B = ftl2.B
+#     return ftl
+# end
 
 # # gets an element
 # @inline function Base.getindex(ftl::FlattenedTensorList{T,N,IXT,AT}, fi::Integer, bi::Integer, ixs::Vararg{Integer,N}) where {T,N,IXT,AT}

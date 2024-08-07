@@ -340,7 +340,9 @@ function eval_diff_tree_array_cpu(
         batch_len = min(cX.B - batch_offset, output.B)
         result += _eval_diff_tree_array_cpu(tree, constants, operators, cX, reducer_op, output, batch_offset, batch_len)
     end
-    return result
+
+    mapk_ti!(x -> x/cX.B, sample_flat(constants, 2))
+    return result/cX.B
 
 end
 
@@ -401,7 +403,7 @@ function eval_tree_array_cpu(
         batch_len = min(cX.B - batch_offset, output.B)
         result += _eval_tree_array_cpu(tree, constants, operators, cX, reducer_op, output, batch_offset, batch_len)
     end
-    return result
+    return result/cX.B
 
 end
 
@@ -411,41 +413,62 @@ function eval_tree_array_cpu(
     operators::TensorOperatorEnum,
     cX::FlattenedTensorList{T,N,IXT,AT},
     out_results::FlattenedTensorList{T,N,IXT,AT},
-    buffer::AbstractVector{T} 
+    buffer::AbstractVector{T},
 ) where {T,N,IXT,AT}
 
     output = make_ftl_from_tree(tree, buffer, cX.B, Val(false))
     for i in 1:div(cX.B + output.B-1, output.B)
-        batch_offset = i*output.B
-        batch_len = min(cX.B - batch_offset, output.B)
-        _eval_tree_array_cpu(tree, constants, operators, cX, out_results, output, batch_offset, batch_len)
+        batch_offset_1 = i*output.B
+        batch_len_1 = min(cX.B - batch_offset, output.B)
+        _eval_tree_array_cpu(tree, constants, operators, cX, out_results, output, batch_offset_1, batch_len_1)
     end
 
 end
 
 
-
-
+# TODO: reorder them to take less space
 struct GPUInstruction
+    opv::UInt8 
+        # The first 3 bits represent (opv>>5):
+            # 0 for direct unary op
+            # 1 for direct binary op
+            # 2 for derivative of unary op
+            # 3 for left derivative of binary op
+            # 4 for right derivative of binary op
+            # 5 for direct reducer op
+            # 6 for derivative of reducer_op
+            # 7 nothing
+        # The later 5 bits represent the operator index (opv<<3)>>3
     
-    degree::Int8
-    op::Int8
-    opv::Int8 # 0 for direct operation, 1 for left derivative, 2 for right derivative, 3 for both left and right derivatives
+    # the first 2 bits (l>>14) represent the source: 1 for temp, 2 for constants, 3 for cX, 0 for undefined
+    # the rest represent the index in that array (l<<2)>>2
+    l::UInt16
+    r::UInt16
+    res::UInt16
+    din::UInt16 # for derivatives, the derivative to calculate
 
-    l_source::Int8 # 0 for temporary array, 1 for inputs array, 2 for constants array
-    r_source::Int8
-    
-    l_index::Int16
-    r_index::Int16
-    
-    dl_index::Int16
-    dr_index::Int16
+    layer::Int16 # the layer
+    threads::Int32 # the number of threads to run the operation
 
-    result::Int16
-    dresult::Int16
+end
 
-    threads::Int32
+function string_gpuinstruction(i::GPUInstruction, operators::TensorOperatorEnum)
+    function show_source(s)
+        return if (s>>14) == 1 "temp$((s<<2)>>2)"
+        elseif (s>>14) == 2 "consts$((s<<2)>>2)"
+        elseif (s>>14) == 3 "cX$((s<<2)>>2)"
+        elseif (s>>14) == 0 "???"
+        end
+    end
 
+    return "L$(i.layer), T$(i.threads): $(show_source(i.res)) = " * 
+        if (i.opv>>5) == 0 "$(String(operators.unaops[(i.opv<<3)>>3].symbol_name))($(show_source(i.l)))"
+        elseif (i.opv>>5) == 1 "$(String(operators.binops[(i.opv<<3)>>3].symbol_name))($(show_source(i.l)), $(show_source(i.r)))"
+        elseif (i.opv>>5) == 2 "$(String(operators.unaops[(i.opv<<3)>>3].symbol_name))'($(show_source(i.l))) * $(show_source(i.din))"
+        elseif (i.opv>>5) == 3 "$(String(operators.binops[(i.opv<<3)>>3].symbol_name))l'($(show_source(i.l)), $(show_source(i.r))) * $(show_source(i.din))"
+        elseif (i.opv>>5) == 4 "$(String(operators.binops[(i.opv<<3)>>3].symbol_name))r'($(show_source(i.l)), $(show_source(i.r))) * $(show_source(i.din))"
+        elseif (i.opv>>5) == 5 "L($(show_source(i.l)), $(show_source(i.r)))"
+        elseif (i.opv>>5) == 6 "L'($(show_source(i.l)), $(show_source(i.r)))" end
 end
 
 function count_layers(tree::AbstractNode)
@@ -464,7 +487,7 @@ function count_grad_layers(tree::AbstractNode)
     elseif tree.degree == 1
         return count_grad_layers(tree.l)+1
     elseif tree.degree == 2
-        return max(count_layers(tree.l), count_layers(tree.r)) + 1
+        return max(count_grad_layers(tree.l), count_grad_layers(tree.r)) + 1
     elseif tree.degree == 0
         return 1
     end
@@ -473,105 +496,110 @@ end
 
 function eval_diff_tree_array_gpu(
     tree::AbstractTensorExprNode{T,N},
-    cX::FlattenedTensorList{T,N,IXT,AT},
     constants::FlattenedTensorList{T,N,IXT,AT},
     operators::TensorOperatorEnum,
-    loss_op::Integer,
+    cX::FlattenedTensorList{T,N,IXT,AT},
+    reducer_op::TensorOperator,
     buffer::AbstractVector{T}
 ) where {T,N,IXT,AT}
 
     layers = count_layers(tree)
     grad_layers = count_grad_layers(tree)
-    instructions = [GPUInstruction[] for _ in 1:(layers+grad_layers)]
+    instructions = GPUInstruction[]
 
     get_source(node) = node.degree == 0 ? (node.constant ? 2 : 1) : 0
     
+    function get_node_source(node)
+        return (UInt16(node.degree == 0 ? (node.constant ? 2 : 3) : 1)<<14) | UInt16(node.feature)
+    end
+    function get_grad_source(node)
+        return node.constant ? ((UInt16(1)<<14) | UInt16(node.grad_ix)) : UInt16(0)
+    end
+
     function recurse_layers_up(node::AbstractNode)
         layer = if node.degree == 1
-            recurse_layers(node.l)+1
+            recurse_layers_up(node.l)+1
         elseif node.degree == 2
-            max(recurse_layers(node.l), recurse_layers(node.r))+1
+            max(recurse_layers_up(node.l), recurse_layers_up(node.r))+1
         elseif node.degree == 0
-            0
+            Int16(0)
         end
         if node.degree != 0
-            instructions[layer].push!(GPUInstruction(
-                node.degree, node.op, 0,
-                get_source(node.l), node.degree == 2 ? get_source(node.r) : 0, 
-                node.l.feature, node.degree == 2 ? node.r.feature : 0, 0, 0,
-                node.feature, 0,
-                100
-            ))
+            opv = UInt8(node.degree == 1 ? 0 : 1) << 5 | UInt8(node.op)
+            if node.degree == 1
+                threads = operators.unaops[node.op].gpu_metadata(node.l.shape)[1]
+                push!(instructions, GPUInstruction(
+                    opv, get_node_source(node.l), UInt16(0), get_node_source(node), UInt16(0), layer, threads
+                ))
+            elseif node.degree == 2
+                threads = operators.binops[node.op].gpu_metadata(node.l.shape, node.r.shape)[1]
+                push!(instructions, GPUInstruction(
+                    opv, get_node_source(node.l), get_node_source(node.r), get_node_source(node), UInt16(0), layer, threads
+                ))
+            end
         end
         return layer
     end
+    recurse_layers_up(tree)
+
+    push!(instructions, GPUInstruction(
+        UInt8(5)<<5, get_node_source(tree), UInt16(3)<<14 | UInt16(length(cX.positions)), UInt16(1)<<14 | UInt16(1), UInt16(0), 
+        layers+1, reducer_op.gpu_metadata(tree.shape)[1]
+    ))
+    if tree.constant
+        push!(instructions, GPUInstruction(
+            UInt8(6)<<5, get_node_source(tree), UInt16(3)<<14 | UInt16(length(cX.positions)), get_grad_source(tree), UInt16(0), 
+            layers+1, reducer_op.gpu_metadata(tree.shape)[2]
+        ))
+    end
+
     function recurse_layers_down(node::AbstractNode)
         if !node.constant
             return 0
         end
         grad_layer = if node.degree == 1
-            count_grad_layers(node.l)+1
+            recurse_layers_down(node.l)+1
         elseif node.degree == 2
-            max(count_layers(node.l), count_layers(node.r)) + 1
+            max(recurse_layers_down(node.l), recurse_layers_down(node.r)) + 1
         elseif node.degree == 0
-            1
+            Int16(1)
         end
+        pushing_layer = layers+2+grad_layers-grad_layer # to be between layers+2 and layers+2+grad_layer
         if node.degree == 1
-            instructions[layers+grad_layers+2-grad_layer].push!(GPUInstruction(
-                node.degree, node.op, 1,
-                get_source(node.l), 0, 
-                node.l.feature, 0, node.l.grad_ix, 0,
-                node.feature, node.grad_ix,
-                100
+            opv = UInt8(2) << 5 | UInt8(node.op)
+            threads = operators.unaops[node.op].gpu_metadata(node.l.shape)[2]
+            push!(instructions, GPUInstruction(
+                opv, get_node_source(node.l), UInt16(0), get_grad_source(node.l), 
+                get_grad_source(node), pushing_layer, threads
             ))
         elseif node.degree == 2
-            if node.l.constant && node.r.constant
-                instructions[layers+grad_layers+2-grad_layer].push!(GPUInstruction(
-                    node.degree, node.op, 3,
-                    get_source(node.l), 2, 
-                    node.l.feature, node.r.feature, node.l.grad_ix, node.r.grad_ix,
-                    node.feature, node.grad_ix,
-                    100
-                ))
-            elseif node.l.constant
-                instructions[layers+grad_layers+2-grad_layer].push!(GPUInstruction(
-                    node.degree, node.op, 1,
-                    get_source(node.l), 2, 
-                    node.l.feature, node.r.feature, node.l.grad_ix, node.r.grad_ix,
-                    node.feature, node.grad_ix,
-                    100
-                ))
-            elseif node.r.constant
-                instructions[layers+grad_layers+2-grad_layer].push!(GPUInstruction(
-                    node.degree, node.op, 2,
-                    get_source(node.l), 2, 
-                    node.l.feature, node.r.feature, node.l.grad_ix, node.r.grad_ix,
-                    node.feature, node.grad_ix,
-                    100
+            if node.l.constant
+                opv = UInt8(3) << 5 | UInt8(node.op)
+                threads = operators.binops[node.op].gpu_metadata(node.l.shape, node.r.shape)[2]
+                push!(instructions, GPUInstruction(
+                    opv, get_node_source(node.l), get_node_source(node.r), get_grad_source(node.l), 
+                    get_grad_source(node), pushing_layer, threads
                 ))
             end
-        elseif node.degree == 0
+            if node.r.constant
+                threads = operators.binops[node.op].gpu_metadata(node.l.shape, node.r.shape)[3]
+                opv = UInt8(4) << 5 | UInt8(node.op)
+                push!(instructions, GPUInstruction(
+                    opv, get_node_source(node.l), get_node_source(node.r), get_grad_source(node.r), 
+                    get_grad_source(node), pushing_layer, threads
+                ))
+            end
         end
         return grad_layer
     end
-    recurse_layers_up(tree)
     recurse_layers_down(tree)
-    instructions[layers+1].push!(GPUInstruction(
-        2, loss_op, 0,
-        get_source(tree.l), 1,
-        tree.feature, length(cX.positions),
-        tree.grad_ix, 0,
-        1, 0,
-        100
-    ))
-    instructions[layers+1].push!(GPUInstruction(
-        2, loss_op, 1,
-        get_source(tree.l), 1,
-        tree.feature, length(cX.positions),
-        tree.grad_ix, 0,
-        1, 0,
-        100
-    ))
+    sort!(instructions; by = (ins) -> ins.layer)
+
+    print(string_debug_tree(tree, operators))
+    println("--- INSTRUCTIONS ---")
+    for ins in instructions
+        println(string_gpuinstruction(ins, operators))
+    end
     
 end
 
