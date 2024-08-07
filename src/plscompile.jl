@@ -110,7 +110,7 @@ end
 
 BBB = 11
 
-if true
+if false
     # buffer .= 666
     # BBB = 2000
     # redo_thing()
@@ -123,10 +123,6 @@ if true
         eval_diff_tree_array_gpu(trees[i], constants, operators,  cX, reducer_op,       buffer)
         println()
     end
-    # eval_diff_tree_array_gpu(trees[2], constants, operators,  cX, reducer_op,       buffer)
-    # eval_diff_tree_array_gpu(trees[3], constants, operators,  cX, reducer_op,       buffer)
-    # eval_diff_tree_array_gpu(trees[4], constants, operators,  cX, reducer_op,       buffer)
-    # eval_diff_tree_array_gpu(trees[5], constants, operators,  cX, reducer_op,       buffer)
 
 else
     BBB = Int32(11)

@@ -564,7 +564,7 @@ function eval_diff_tree_array_gpu(
         elseif node.degree == 0
             Int16(1)
         end
-        pushing_layer = layers+2+grad_layers-grad_layer # to be between layers+2 and layers+2+grad_layer
+        pushing_layer = layers+2+grad_layers-grad_layer # to be between layers+2 and layers+1+grad_layer
         if node.degree == 1
             opv = UInt8(2) << 5 | UInt8(node.op)
             threads = operators.unaops[node.op].gpu_metadata(node.l.shape)[2]
@@ -601,6 +601,69 @@ function eval_diff_tree_array_gpu(
         println(string_gpuinstruction(ins, operators))
     end
     
+end
+
+# using CUDA
+macro cuda(x...)
+    return 1
+end
+
+# TODO: move this to the CUDA extension
+@generated function create_gpu_kernel(operators::TensorOperatorEnum, reducer_op::TensorOperator, T::Type, N::Integer, IXT::Type)
+    return quote @cuda launch=false function (
+        instructions::CuDeviceArray{GPUInstruction}, 
+        constantsf::CuDeviceArray{T}, cXf::CuDeviceArray{T}, tempf::CuDeviceArray{T},
+        constantsp::CuDeviceArray{FTLPositionInfo{IXT,N}}, cXp::CuDeviceArray{FTLPositionInfo{IXT,N}}, tempp::CuDeviceArray{FTLPositionInfo{IXT,N}},
+        instr_start, instr_end, cX_batchsize, temp_batchsize, batch_offset
+    )
+        
+        global_ix = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+        ins_to_execute = 0
+        for insx in instr_start:instr_end
+            global_ix -= temp_batchsize * instructions[insx].threads
+            if global_ix <= 0
+                global_ix += temp_batchsize * instructions[insx].threads
+                ins_to_execute = insx
+                break
+            end
+        end
+        if ins_to_execute == 0
+            return
+        end
+
+        thread_ix = mod(global_ix-1, temp_batchsize)+1
+        batch_ix = div(global_ix-1, temp_batchsize)+1
+        ins = instructions[ins_to_execute]
+        op = (ins.opv<<3)>>3
+        opc = ins.opv>>5
+
+        lf, lp, lx = if (ins.l>>14) == 1 tempf, temp
+        elseif (ins.l>>14) == 2 constantsf, constantsp
+        else cXf, cXp end..., (ins.l<<2)>>2
+        
+        resf, resp, resx = if (ins.res>>14) == 1 tempf, tempp
+        elseif (ins.res>>14) == 2 constantsf, constantsp
+        else cXf, cXp end..., (ins.res<<2)>>2
+        
+        if opc == 0
+            # unary forward
+            Base.@nif($(operators.NU), opx -> op == opx, opx -> $(operators.unaops)[opx].gpu_op(lf,lp,lx, resf,resp,resx, thread_ix, batch_ix))
+        elseif opc == 1
+            # binary forward
+        elseif opc == 2
+            # unary derivative
+        elseif opc == 3
+            # binary left derivative
+        elseif opc == 4
+            # binary right derivative
+        elseif opc == 5
+            # reducer_op forward
+        elseif opc == 6
+            # reducer_op derivative
+        end
+
+        return nothing
+    end end
 end
 
 end

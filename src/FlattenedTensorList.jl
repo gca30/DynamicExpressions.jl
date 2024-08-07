@@ -61,18 +61,6 @@ end
     return N
 end
 
-# @inline function merge_continuous_dims(tix::TensorIndex{IXT,N}, ::Val{cd}) where {IXT,N,cd}
-#     # ::TensorIndex{IXT,N-cd}
-#     # if it's zero it's the original array
-#     # if it's one it's still the original array?
-#     # if it's 2, we merge the first two
-#     return TensorIndex{IXT,N-cd}(
-#         tix.ar, tix.offset, 
-#         (prod(ntuple(i -> tix.shape[i], Val(cd+1))), ntuple(i -> tix.shape[i+cd], Val(N-cd-1))...),
-#         tuple(i -> tix.shape[i+cd], Val(N-cd))
-#     )
-# end
-
 @inline Base.axes(ti::TensorIndex, dim::Integer) = 1:(ti.shape[dim])
 
 @inline function ti_from_array(x::AT) where {T,N,AT<:AbstractArray{T,N}}
@@ -206,7 +194,7 @@ function _map1v_ti!(op::F, dest::TensorIndex{IXT,N}, ::Val{V}) where{F,IXT,N,V}
     while true
         i += 1
 
-        for j in 0:viewlen
+        @simd for j in 0:viewlen
             @inbounds dest.ar[dinar+j] = op((@inbounds dest.ar[dinar+j]))
         end
 
@@ -232,15 +220,13 @@ end
 function _mapkv_ti!(op::F, dest::TensorIndex{IXT,N}, ::Val{V}, sources::Vararg{TensorIndex{IXT,N}, K}) where {V,F,IXT,N,K}
     
     itershape = ntuple(nx -> max(dest.shape[V+nx], maximum(source -> source.shape[V+nx], sources; init=0)), Val(N-V))
-    # asserts
-    # remove once the function is verified to work
+    # asserts, remove once the function is verified to work
     # for nx in 1:N
     #     @assert itershape[nx] == dest.shape[nx] || dest.shape[nx] == 1
     #     for kx in 1:K
     #         @assert itershape[nx] == sources[kx].shape[nx] || sources[kx].shape[nx] == 1
     #     end 
     # end
-    # println("mapk_ti!")
     viewlen = 1
     for i in 1:V
         viewlen *= dest.shape[i]
@@ -260,7 +246,6 @@ function _mapkv_ti!(op::F, dest::TensorIndex{IXT,N}, ::Val{V}, sources::Vararg{T
     # xinar = xi[1] * strides[1] + xi[2] * strides[2] + xi[3] * strides[3] + ....
     # xi[1] = if shape[1] == itershape[1] ? 1 : ii[1]
     # djumps[nx] - what change does occur to dinar when we increment di[nx]
-    # we are in the equal case, we increment xi, then it increases by strides[nx]
     djumps[1] = dest.shape[V+1] == itershape[1] ? dest.strides[V+1] : 0
     for kx in 1:K
         sjumps[kx,1] = sources[kx].shape[V+1] == itershape[1] ? sources[kx].strides[V+1] : 0
@@ -271,15 +256,12 @@ function _mapkv_ti!(op::F, dest::TensorIndex{IXT,N}, ::Val{V}, sources::Vararg{T
             sjumps[kx,nx] = (sources[kx].shape[V+nx] == itershape[nx] ? sources[kx].strides[V+nx] : 0) - (sources[kx].shape[V+nx-1] == itershape[nx-1] ? sources[kx].shape[V+nx-1]*sources[kx].strides[V+nx-1] : 0)
         end
     end
-    #display(dest)
-    #for kx in 1:K display(sources[kx]) end
-    #@show itershape, djumps, sjumps
 
     i = 0
     while true
         i += 1
         #@show dinar, sinar, ii
-        for j in 0:viewlen
+        @simd for j in 0:viewlen
             @inbounds dest.ar[dinar+j] = op(
                 (@inbounds dest.ar[dinar+j]),
                 ntuple(kx -> (@inbounds sources[kx].ar[sinar[kx]+j]), Val(K))...
@@ -307,8 +289,6 @@ function _mapkv_ti!(op::F, dest::TensorIndex{IXT,N}, ::Val{V}, sources::Vararg{T
             nx+=1
         end
         
-        # TODO: remove asserts later after veryfing that this function always works
-        # @show dinar, sinar, ii
         # @assert dinar == index_clamp(dest, ii...)
         # for kx in 1:K
         #     @assert sinar[kx] == index_clamp(sources[kx], ii...)
@@ -325,18 +305,13 @@ function _mapk_ti!(op::F, dest::TensorIndex{IXT,N}, sources::Vararg{TensorIndex{
 
     iterlen = prod(itershape)
     ii = MVector{N,IXT}(ntuple(Returns(1), Val(N)))
-    # why can't julia have static mutable arrays on the stack??
-    # we will have to do this janky thing
     
     sinar = MVector{K,IXT}(ntuple(kx -> sources[kx].offset+1, Val(K)))
     dinar = dest.offset+1
 
     djumps = MVector{N,IXT}(undef)
     sjumps = MMatrix{K,N,Int32}(undef)
-    # xinar = xi[1] * strides[1] + xi[2] * strides[2] + xi[3] * strides[3] + ....
-    # xi[1] = if shape[1] == itershape[1] ? 1 : ii[1]
-    # djumps[nx] - what change does occur to dinar when we increment di[nx]
-    # we are in the equal case, we increment xi, then it increases by strides[nx]
+    
     djumps[1] = dest.shape[1] == itershape[1] ? dest.strides[1] : 0
     for kx in 1:K
         sjumps[kx,1] = sources[kx].shape[1] == itershape[1] ? sources[kx].strides[1] : 0
@@ -347,14 +322,10 @@ function _mapk_ti!(op::F, dest::TensorIndex{IXT,N}, sources::Vararg{TensorIndex{
             @inbounds sjumps[kx,nx] = (sources[kx].shape[nx] == itershape[nx] ? sources[kx].strides[nx] : 0) - (sources[kx].shape[nx-1] == itershape[nx-1] ? sources[kx].shape[nx-1]*sources[kx].strides[nx-1] : 0)
         end
     end
-    #display(dest)
-    #for kx in 1:K display(sources[kx]) end
-    #@show itershape, djumps, sjumps
 
     i = 0
     while true
         i += 1
-        #@show dinar, sinar, ii
 
         @inbounds dest.ar[dinar] = op(
             @inbounds(dest.ar[dinar]),
@@ -383,7 +354,6 @@ function _mapk_ti!(op::F, dest::TensorIndex{IXT,N}, sources::Vararg{TensorIndex{
         end
         
         # TODO: remove asserts later after veryfing that this function always works
-        # @show dinar, sinar, ii
         # @assert dinar == index_clamp(dest, ii...)
         # for kx in 1:K
         #     @assert sinar[kx] == index_clamp(sources[kx], ii...)
@@ -401,6 +371,11 @@ end
     return nothing
 end
 
+
+"""
+    Generalized function to work on TensorIndex, which takes in an operator, a destination TensorIndex and other sources.
+`mapk_ti!` support broadcasting (if the size in one dimension is 1, then it is multiplied across dimensions) 
+"""
 @generated function mapk_ti!(op::F, dest::TensorIndex{IXT,N}, sources::Vararg{TensorIndex{IXT,N},K}) where {F,IXT,N,K}
     #_mapk_ti!(op, dest, sources...)
     return if K == 0 quote 
@@ -542,6 +517,7 @@ end
 
 function permute_features(ftl::FlattenedTensorList{T,N,IXT,AT,APT}, features::AbstractVector{IXT}) where {T,N,IXT,AT,APT}
     B = ftl.B
+    filter!(idx -> idx < length(ftl.positions), features)
     l = sum(idx -> ftl.positions[idx].len, features)
     reordered = AT(undef, B*l)
     positions = APT(undef, length(features))
@@ -559,51 +535,11 @@ function permute_features(ftl::FlattenedTensorList{T,N,IXT,AT,APT}, features::Ab
     return newftl
 end
 
-# function permute_features!(ftl::FlattenedTensorList, features::AbstractVector)
-#     ftl2 = permute_features(ftl, features)
-#     ftl.flattened = ftl2.flattened
-#     ftl.positions = ftl2.positions
-#     ftl.L = ftl2.L
-#     ftl.B = ftl2.B
-#     return ftl
-# end
-
-# # gets an element
-# @inline function Base.getindex(ftl::FlattenedTensorList{T,N,IXT,AT}, fi::Integer, bi::Integer, ixs::Vararg{Integer,N}) where {T,N,IXT,AT}
-#     acum = ftl.positions[fi].offset
-#     stride = ftl.positions[fi].strides
-#     fix = sum(NTuple{N,IXT}(ixs) .* (stride .- one(IXT))) + one(IXT)
-#     return ftl.flattened[ftl.L*(bi-1) + acum + fix]
-# end
-
-# # returns a reshape(view(AbstractArray)) representing a feature with all the samples
-# @inline function Base.getindex(ftl::FlattenedTensorList{T,N,IXT,AT}, fi::Integer) where {T,N,IXT,AT}
-#     acum = ftl.positions[fi].offset
-#     fl = ftl.positions[fi].len
-#     sizes = ftl.positions[fi].shape
-#     ffv = @view(reshape(@view(ftl.flattened[1:(ftl.L*ftl.B)]), (ftl.L, ftl.B))[(acum + 1):(acum + fl), :])
-#     return reshape(ffv, (sizes..., ftl.B))
-# end
-
-# # returns a reshape(view(AbstractArray)) representing a feature of the given sample
-# @inline function Base.getindex(ftl::FlattenedTensorList{T,N,IXT,AT}, fi::Integer, bi::Integer) where {T,N,IXT,AT}
-#     #acum, fl, sizes, _ = ftl.positions[fi]
-#     acum, = ftl.positions[fi].offset
-#     fl = ftl.positions[fi].len
-#     sizes = ftl.positions[fi].shape
-#     ffv = @view(reshape(@view(ftl.flattened[1:(ftl.L*ftl.B)]), (ftl.L, ftl.B))[(acum + 1):(acum + fl), bi])
-#     return reshape(ffv, sizes)
-# end
-
 function Base.display(ftl::FlattenedTensorList{T,N,IXT,AT}) where {T,N,IXT,AT}
     print("$(length(ftl.positions))-feature $(ftl.B)-sample $(ftl.L)-samplelength FlattenedTensorList{$(T),$(N)} of sizes:\n")
     for i in eachindex(ftl.positions)
         print("   $(ftl.positions[i].shape) at pos $(ftl.positions[i].offset)\n")
     end
-    # println("with values:")
-    # for i in eachindex(ftl.positions)
-    #     print("   ", ftl[i, 1], "\n")
-    # end
 end
 
 function Base.display(ix::TensorIndex{IXT,N}) where {IXT,N}

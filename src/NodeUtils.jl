@@ -16,7 +16,6 @@ import ..NodeModule:
     filter_map
 import ..FlattenedTensorListModule:
     FlattenedTensorList,
-    permute_features!,
     treat_as_flattened
 import ..ValueInterfaceModule:
     pack_scalar_constants!, unpack_scalar_constants, count_scalar_constants, get_number_type
